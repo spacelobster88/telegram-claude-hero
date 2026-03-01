@@ -1,0 +1,26 @@
+# Binaries
+telegram-claude-hero
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Config file (contains secrets)
+.telegram-claude-hero.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
