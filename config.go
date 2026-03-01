@@ -59,12 +59,12 @@ func SaveConfig(cfg *Config) error {
 	return nil
 }
 
-func PromptForToken() (string, error) {
-	fmt.Print("Enter your Telegram Bot Token: ")
+func promptInput(prompt string) (string, error) {
+	fmt.Print(prompt)
 	reader := bufio.NewReader(os.Stdin)
-	token, err := reader.ReadString('\n')
+	val, err := reader.ReadString('\n')
 	if err != nil {
-		return "", fmt.Errorf("reading token: %w", err)
+		return "", err
 	}
-	return strings.TrimSpace(token), nil
+	return strings.TrimSpace(val), nil
 }

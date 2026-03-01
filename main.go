@@ -16,7 +16,7 @@ func main() {
 
 	if cfg.TelegramBotToken == "" {
 		fmt.Println("No Telegram bot token found.")
-		token, err := PromptForToken()
+		token, err := promptInput("Enter your Telegram Bot Token: ")
 		if err != nil {
 			log.Fatalf("Error reading token: %v", err)
 		}
@@ -45,6 +45,6 @@ func main() {
 		os.Exit(0)
 	}()
 
-	fmt.Println("Bot started. Send /start in Telegram to begin a Claude session.")
+	fmt.Println("Bot started. Send a message in Telegram to begin.")
 	bot.Run()
 }

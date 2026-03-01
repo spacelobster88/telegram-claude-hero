@@ -1,121 +1,108 @@
 package main
 
 import (
-	"io"
+	"bytes"
+	"context"
+	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"sync"
-	"time"
-
-	"github.com/creack/pty"
+	"syscall"
 )
 
 type Session struct {
-	cmd  *exec.Cmd
-	ptmx *os.File
-	mu   sync.Mutex
-	done chan struct{}
+	mu        sync.Mutex
+	busy      bool
+	cancel    context.CancelFunc
+	cmd       *exec.Cmd
+	firstDone bool
 }
 
 func NewSession() *Session {
-	return &Session{
-		done: make(chan struct{}),
-	}
+	return &Session{}
 }
 
-func (s *Session) Start(onOutput func(string)) error {
+func (s *Session) Send(ctx context.Context, prompt string) (string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.cmd = exec.Command("claude", "--dangerously-skip-permissions")
-	s.cmd.Env = append(os.Environ(), "TERM=dumb")
-
-	ptmx, err := pty.Start(s.cmd)
-	if err != nil {
-		return err
+	if s.busy {
+		s.mu.Unlock()
+		return "", fmt.Errorf("still processing the previous message, please wait")
 	}
-	s.ptmx = ptmx
+	s.busy = true
+	ctx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	continued := s.firstDone
+	s.mu.Unlock()
 
-	// Set a reasonable terminal size
-	_ = pty.Setsize(ptmx, &pty.Winsize{Rows: 50, Cols: 120})
-
-	go s.readLoop(onOutput)
-	return nil
-}
-
-func (s *Session) readLoop(onOutput func(string)) {
-	defer close(s.done)
-
-	buf := make([]byte, 4096)
-	var accumulated string
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	outputCh := make(chan string, 64)
-
-	// Reader goroutine
-	go func() {
-		for {
-			n, err := s.ptmx.Read(buf)
-			if n > 0 {
-				outputCh <- string(buf[:n])
-			}
-			if err != nil {
-				if err != io.EOF {
-					log.Printf("PTY read error: %v", err)
-				}
-				close(outputCh)
-				return
-			}
-		}
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		s.cmd = nil
+		s.busy = false
+		s.cancel = nil
+		s.mu.Unlock()
 	}()
 
-	// Debounce and flush
-	for {
-		select {
-		case chunk, ok := <-outputCh:
-			if !ok {
-				// PTY closed, flush remaining
-				if accumulated != "" {
-					onOutput(accumulated)
-				}
-				return
-			}
-			accumulated += chunk
-		case <-ticker.C:
-			if accumulated != "" {
-				onOutput(accumulated)
-				accumulated = ""
-			}
-		}
+	args := []string{"-p", "--output-format", "text", "--dangerously-skip-permissions"}
+	if continued {
+		args = append(args, "--continue")
 	}
+	args = append(args, prompt)
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	s.mu.Lock()
+	s.cmd = cmd
+	s.mu.Unlock()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	log.Printf("[claude] running (continue=%v) prompt=%q", continued, prompt)
+
+	if err := cmd.Run(); err != nil {
+		// Don't report errors if we were intentionally cancelled
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("session stopped")
+		}
+		errMsg := stderr.String()
+		if errMsg != "" {
+			return "", fmt.Errorf("claude: %s", errMsg)
+		}
+		return "", fmt.Errorf("claude: %w", err)
+	}
+
+	s.mu.Lock()
+	s.firstDone = true
+	s.mu.Unlock()
+
+	response := stdout.String()
+	log.Printf("[claude] response length=%d", len(response))
+	return response, nil
 }
 
-func (s *Session) Write(input string) error {
+func (s *Session) IsBusy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.ptmx == nil {
-		return nil
-	}
-	_, err := s.ptmx.Write([]byte(input + "\n"))
-	return err
+	return s.busy
 }
 
 func (s *Session) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.ptmx != nil {
-		s.ptmx.Close()
+	if s.cancel != nil {
+		s.cancel()
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Kill()
-		s.cmd.Wait()
+		pgid, err := syscall.Getpgid(s.cmd.Process.Pid)
+		if err == nil {
+			log.Printf("[claude] killing process group %d", pgid)
+			syscall.Kill(-pgid, syscall.SIGKILL)
+		} else {
+			s.cmd.Process.Kill()
+		}
 	}
-}
-
-func (s *Session) Wait() {
-	<-s.done
 }

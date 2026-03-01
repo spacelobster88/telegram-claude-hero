@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -53,52 +54,32 @@ func (b *Bot) Stop() {
 
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
+	log.Printf("[recv] chat=%d user=%s (@%s) text=%q",
+		chatID, msg.From.FirstName, msg.From.UserName, msg.Text)
 
-	switch {
-	case msg.Command() == "start":
-		b.handleStart(chatID)
-	case msg.Command() == "stop":
+	if msg.Command() == "stop" {
 		b.handleStop(chatID)
-	default:
-		b.handleText(chatID, msg.Text)
-	}
-}
-
-func (b *Bot) handleStart(chatID int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.session != nil {
-		b.send(chatID, "A session is already active. Use /stop to end it first.")
 		return
 	}
 
-	b.activeChatID = chatID
-	b.session = NewSession()
-
-	err := b.session.Start(func(output string) {
-		output = cleanPTYOutput(output)
-		if output == "" {
-			return
-		}
-		b.sendLong(chatID, output)
-	})
-	if err != nil {
-		b.send(chatID, fmt.Sprintf("Failed to start Claude session: %v", err))
-		b.session = nil
-		return
-	}
-
-	b.send(chatID, "Claude session started. Send me your prompts!")
-
-	// Monitor session end
-	go func() {
-		b.session.Wait()
+	if msg.Command() == "start" {
 		b.mu.Lock()
-		b.session = nil
+		if b.session != nil {
+			b.session.Stop()
+		}
+		b.session = NewSession()
+		b.activeChatID = chatID
 		b.mu.Unlock()
-		b.send(chatID, "Claude session ended.")
-	}()
+		b.send(chatID, "Session started. Send me your prompts!")
+		return
+	}
+
+	text := msg.Text
+	if text == "" {
+		return
+	}
+
+	b.handleText(chatID, text)
 }
 
 func (b *Bot) handleStop(chatID int64) {
@@ -117,23 +98,41 @@ func (b *Bot) handleStop(chatID int64) {
 
 func (b *Bot) handleText(chatID int64, text string) {
 	b.mu.Lock()
+	// Auto-start session on first message
+	if b.session == nil {
+		b.session = NewSession()
+		b.activeChatID = chatID
+		log.Printf("[bot] auto-started session for chat=%d", chatID)
+	}
 	session := b.session
 	activeChatID := b.activeChatID
 	b.mu.Unlock()
-
-	if session == nil {
-		b.send(chatID, "No active session. Use /start to begin.")
-		return
-	}
 
 	if chatID != activeChatID {
 		b.send(chatID, "Another chat has an active session.")
 		return
 	}
 
-	if err := session.Write(text); err != nil {
-		b.send(chatID, fmt.Sprintf("Error sending input: %v", err))
+	if session.IsBusy() {
+		b.send(chatID, "Still processing the previous message, please wait...")
+		return
 	}
+
+	typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+	b.api.Send(typing)
+
+	go func() {
+		response, err := session.Send(context.Background(), text)
+		if err != nil {
+			b.send(chatID, fmt.Sprintf("Error: %v", err))
+			return
+		}
+		if response == "" {
+			b.send(chatID, "(empty response)")
+			return
+		}
+		b.sendLong(chatID, response)
+	}()
 }
 
 func (b *Bot) send(chatID int64, text string) {
@@ -162,7 +161,6 @@ func splitMessage(text string) []string {
 			break
 		}
 
-		// Try to split at a newline
 		cutoff := maxMessageLen
 		if idx := strings.LastIndex(text[:cutoff], "\n"); idx > 0 {
 			cutoff = idx + 1
@@ -171,55 +169,4 @@ func splitMessage(text string) []string {
 		text = text[cutoff:]
 	}
 	return chunks
-}
-
-// cleanPTYOutput strips common ANSI escape sequences from PTY output.
-func cleanPTYOutput(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		if s[i] == '\x1b' {
-			// Skip CSI sequences: ESC [ ... final_byte
-			if i+1 < len(s) && s[i+1] == '[' {
-				j := i + 2
-				for j < len(s) && s[j] >= 0x20 && s[j] <= 0x3F {
-					j++
-				}
-				if j < len(s) && s[j] >= 0x40 && s[j] <= 0x7E {
-					j++
-				}
-				i = j
-				continue
-			}
-			// Skip OSC sequences: ESC ] ... BEL/ST
-			if i+1 < len(s) && s[i+1] == ']' {
-				j := i + 2
-				for j < len(s) {
-					if s[j] == '\x07' {
-						j++
-						break
-					}
-					if s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\' {
-						j += 2
-						break
-					}
-					j++
-				}
-				i = j
-				continue
-			}
-			// Skip other two-byte escape sequences
-			i += 2
-			continue
-		}
-		// Skip carriage returns
-		if s[i] == '\r' {
-			i++
-			continue
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return strings.TrimSpace(b.String())
 }
