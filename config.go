@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	TelegramBotToken string `json:"telegram_bot_token"`
+	GatewayURL       string `json:"gateway_url,omitempty"`
 }
 
 func ConfigPath() (string, error) {
@@ -39,6 +40,12 @@ func LoadConfig() (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+
+	// Env var override for gateway mode
+	if envURL := os.Getenv("GATEWAY_URL"); envURL != "" {
+		cfg.GatewayURL = envURL
+	}
+
 	return &cfg, nil
 }
 

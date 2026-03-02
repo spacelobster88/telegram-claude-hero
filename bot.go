@@ -14,18 +14,27 @@ const maxMessageLen = 4096
 
 type Bot struct {
 	api          *tgbotapi.BotAPI
-	session      *Session
-	activeChatID int64
+	session      *Session   // only used in local mode
+	activeChatID int64      // only used in local mode
 	mu           sync.Mutex
+	gateway      *GatewayClient // nil in local mode
 }
 
-func NewBot(token string) (*Bot, error) {
+func NewBot(token string, gatewayURL string) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("creating bot: %w", err)
 	}
 	log.Printf("Authorized as @%s", api.Self.UserName)
-	return &Bot{api: api}, nil
+
+	b := &Bot{api: api}
+	if gatewayURL != "" {
+		b.gateway = NewGatewayClient(gatewayURL)
+		log.Printf("Gateway mode: %s", gatewayURL)
+	} else {
+		log.Printf("Local mode: single session")
+	}
+	return b, nil
 }
 
 func (b *Bot) Run() {
@@ -58,19 +67,12 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		chatID, msg.From.FirstName, msg.From.UserName, msg.Text)
 
 	if msg.Command() == "stop" {
-		b.handleStop(chatID)
+		b.handleStop(chatID, msg)
 		return
 	}
 
 	if msg.Command() == "start" {
-		b.mu.Lock()
-		if b.session != nil {
-			b.session.Stop()
-		}
-		b.session = NewSession()
-		b.activeChatID = chatID
-		b.mu.Unlock()
-		b.send(chatID, "Session started. Send me your prompts!")
+		b.handleStart(chatID, msg)
 		return
 	}
 
@@ -79,10 +81,25 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	b.handleText(chatID, text)
+	if b.gateway != nil {
+		b.handleTextGateway(chatID, text, msg)
+	} else {
+		b.handleTextLocal(chatID, text)
+	}
 }
 
-func (b *Bot) handleStop(chatID int64) {
+func (b *Bot) handleStop(chatID int64, msg *tgbotapi.Message) {
+	if b.gateway != nil {
+		chatIDStr := fmt.Sprintf("%d", chatID)
+		if err := b.gateway.Stop(chatIDStr); err != nil {
+			b.send(chatID, fmt.Sprintf("Error stopping session: %v", err))
+			return
+		}
+		b.send(chatID, "Session stopped.")
+		return
+	}
+
+	// Local mode
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -96,7 +113,52 @@ func (b *Bot) handleStop(chatID int64) {
 	b.send(chatID, "Session stopped.")
 }
 
-func (b *Bot) handleText(chatID int64, text string) {
+func (b *Bot) handleStart(chatID int64, msg *tgbotapi.Message) {
+	if b.gateway != nil {
+		chatIDStr := fmt.Sprintf("%d", chatID)
+		// Stop existing session to start fresh
+		b.gateway.Stop(chatIDStr)
+		b.send(chatID, "Session started. Send me your prompts!")
+		return
+	}
+
+	// Local mode
+	b.mu.Lock()
+	if b.session != nil {
+		b.session.Stop()
+	}
+	b.session = NewSession()
+	b.activeChatID = chatID
+	b.mu.Unlock()
+	b.send(chatID, "Session started. Send me your prompts!")
+}
+
+// handleTextGateway forwards messages to the mini-claude-bot gateway.
+// No single-chat restriction — each chat_id gets its own isolated session.
+func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message) {
+	typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+	b.api.Send(typing)
+
+	chatIDStr := fmt.Sprintf("%d", chatID)
+	userID := fmt.Sprintf("%d", msg.From.ID)
+	username := msg.From.UserName
+
+	go func() {
+		response, err := b.gateway.Send(chatIDStr, text, userID, username)
+		if err != nil {
+			b.send(chatID, fmt.Sprintf("Error: %v", err))
+			return
+		}
+		if response == "" {
+			b.send(chatID, "(empty response)")
+			return
+		}
+		b.sendLong(chatID, response)
+	}()
+}
+
+// handleTextLocal is the original single-session behavior.
+func (b *Bot) handleTextLocal(chatID int64, text string) {
 	b.mu.Lock()
 	// Auto-start session on first message
 	if b.session == nil {
