@@ -1,5 +1,7 @@
 # Binaries
 telegram-claude-hero
+telegram-claude-hero-new
+telegram-claude-hero.bak
 *.exe
 *.exe~
 *.dll
