@@ -2,6 +2,30 @@
 
 A Go CLI tool that bridges a Telegram bot with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Send messages to your Telegram bot, get responses from Claude — using your Claude subscription, no API key needed.
 
+## Architecture
+
+```
+┌─────────┐       ┌──────────────────────┐       ┌──────────────────────────┐
+│ Telegram │       │  telegram-claude-hero │       │  mini-claude-bot         │
+│  Users   │       │  (Go)                │       │  (Python/FastAPI)        │
+│          │       │                      │       │                          │
+│ ┌──────┐ │  Bot  │ ┌──────────────────┐ │       │ ┌──────────────────────┐ │
+│ │User A├─┼──API──┼►│                  │ │ HTTP  │ │ Session Manager      │ │
+│ └──────┘ │       │ │  Telegram Bot    │ │       │ │                      │ │
+│ ┌──────┐ │       │ │                  ├─┼───────┼►│ Chat A → claude -p   │ │
+│ │User B├─┼──────►│ │  Gateway Client  │ │       │ │ Chat B → claude -p   │ │
+│ └──────┘ │       │ │                  │ │       │ │ Chat C → claude -p   │ │
+│ ┌──────┐ │       │ └──────────────────┘ │       │ └──────────────────────┘ │
+│ │User C├─┼──────►│                      │       │                          │
+│ └──────┘ │       │  Local mode:         │       │ + Cron, Memory, Chat DB  │
+│          │       │  claude -p (single)  │       │ + Dashboard, MCP, Reports│
+└─────────┘       └──────────────────────┘       └──────────────────────────┘
+                         ▲                                ▲
+                         │                                │
+                    This repo                    github.com/spacelobster88/
+                                                   mini-claude-bot
+```
+
 ## How it works
 
 **Local mode** (default):
@@ -9,7 +33,7 @@ A Go CLI tool that bridges a Telegram bot with [Claude Code](https://docs.anthro
 - Uses `--continue` to maintain conversation context across messages
 - Single chat session at a time
 
-**Gateway mode** (with [mini-claude-bot](https://github.com/spacelobster/mini-claude-bot)):
+**Gateway mode** (with [mini-claude-bot](https://github.com/spacelobster88/mini-claude-bot)):
 - Forwards messages to a mini-claude-bot gateway API
 - Each Telegram chat gets its own isolated Claude session
 - Supports multiple concurrent users
@@ -24,13 +48,13 @@ In both modes:
 2. Make sure `claude` CLI is installed and authenticated with your subscription
 
 ```bash
-go install github.com/spacelobster/telegram-claude-hero@latest
+go install github.com/spacelobster88/telegram-claude-hero@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/spacelobster/telegram-claude-hero.git
+git clone https://github.com/spacelobster88/telegram-claude-hero.git
 cd telegram-claude-hero
 go build
 ```
@@ -79,7 +103,7 @@ See [`.claude/skills/deploy.md`](.claude/skills/deploy.md) for full details.
 - Go 1.21+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - A Telegram bot token
-- (Gateway mode) [mini-claude-bot](https://github.com/spacelobster/mini-claude-bot) running
+- (Gateway mode) [mini-claude-bot](https://github.com/spacelobster88/mini-claude-bot) running
 
 ## License
 

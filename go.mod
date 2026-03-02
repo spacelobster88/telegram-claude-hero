@@ -1,4 +1,4 @@
-module github.com/spacelobster/telegram-claude-hero
+module github.com/spacelobster88/telegram-claude-hero
 
 go 1.25.0
 
