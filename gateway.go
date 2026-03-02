@@ -32,7 +32,7 @@ func NewGatewayClient(baseURL string) *GatewayClient {
 	return &GatewayClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 6 * time.Minute, // longer than server-side Claude timeout
+			Timeout: 16 * time.Minute, // longer than server-side Claude timeout (15min)
 		},
 	}
 }
