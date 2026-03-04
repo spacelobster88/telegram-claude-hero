@@ -33,6 +33,9 @@ func NewGatewayClient(baseURL string) *GatewayClient {
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: 16 * time.Minute, // longer than server-side Claude timeout (15min)
+			Transport: &http.Transport{
+				DisableKeepAlives: true, // prevent EOF on stale keep-alive connections
+			},
 		},
 	}
 }
@@ -73,6 +76,78 @@ func (g *GatewayClient) Send(chatID, message, userID, username string) (string, 
 	}
 
 	return result.Response, nil
+}
+
+type gatewayBackgroundRequest struct {
+	ChatID   string `json:"chat_id"`
+	Message  string `json:"message"`
+	BotToken string `json:"bot_token"`
+}
+
+type gatewayBackgroundResponse struct {
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type gatewayBackgroundStatus struct {
+	Status         string  `json:"status"`
+	Message        string  `json:"message,omitempty"`
+	ElapsedSeconds float64 `json:"elapsed_seconds,omitempty"`
+	Result         string  `json:"result,omitempty"`
+	StartedAt      float64 `json:"started_at,omitempty"`
+}
+
+func (g *GatewayClient) SendBackground(chatID, message, botToken string) (*gatewayBackgroundResponse, error) {
+	body, err := json.Marshal(gatewayBackgroundRequest{
+		ChatID:   chatID,
+		Message:  message,
+		BotToken: botToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	resp, err := g.httpClient.Post(
+		g.baseURL+"/api/gateway/send-background",
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("background request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var result gatewayBackgroundResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
+func (g *GatewayClient) GetBackgroundStatus(chatID string) (*gatewayBackgroundStatus, error) {
+	resp, err := g.httpClient.Get(g.baseURL + "/api/gateway/background-status/" + chatID)
+	if err != nil {
+		return nil, fmt.Errorf("status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var result gatewayBackgroundStatus
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
 }
 
 func (g *GatewayClient) Stop(chatID string) error {

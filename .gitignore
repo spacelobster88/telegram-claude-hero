@@ -26,3 +26,6 @@ go.work.sum
 .vscode/
 *.swp
 *.swo
+
+# Harness loop state
+.harness/

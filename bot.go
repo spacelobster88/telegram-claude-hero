@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -133,9 +138,160 @@ func (b *Bot) handleStart(chatID int64, msg *tgbotapi.Message) {
 	b.send(chatID, "Session started. Send me your prompts!")
 }
 
+// handleHarnessQuery queries harness progress from chat history
+func (b *Bot) handleHarnessQuery(chatID int64, msg *tgbotapi.Message) {
+	count := 5
+	args := msg.CommandArguments()
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(string(args[0])); err == nil && n > 0 && n <= 20 {
+			count = n
+		}
+	}
+
+	b.send(chatID, fmt.Sprintf("🔍 Querying last %d harness progress messages...", count))
+
+	go func() {
+		progress := b.queryHarnessProgress(count)
+		if progress == "" {
+			b.send(chatID, "No harness progress found in recent messages.")
+		} else {
+			b.sendLong(chatID, progress)
+		}
+	}()
+}
+
+// queryHarnessProgress fetches recent assistant messages from mini-claude-bot
+// and extracts harness progress information
+func (b *Bot) queryHarnessProgress(count int) string {
+	if b.gateway == nil {
+		return "[ERROR] Harness progress requires gateway mode"
+	}
+
+	url := b.gateway.baseURL + "/api/chat/search?limit=" + strconv.Itoa(count*10)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Printf("Failed to fetch chat history: %v", err)
+		return fmt.Sprintf("[ERROR] Failed to fetch progress: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Sprintf("[ERROR] Gateway returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Sprintf("[ERROR] Failed to read response: %v", err)
+	}
+
+	type chatMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+
+	type chatResponse struct {
+		Result []chatMessage `json:"result"`
+	}
+
+	var chatResp chatResponse
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		log.Printf("Failed to parse chat response: %v", err)
+		return fmt.Sprintf("[ERROR] Failed to parse response: %v", err)
+	}
+
+	if len(chatResp.Result) == 0 {
+		return "No harness progress found."
+	}
+
+	// Collect harness-related messages (assistant messages containing progress keywords)
+	var progressMessages []string
+	harnessKeywords := []string{"harness", "progress", "phase", "阶段", "进度", "task", "任务", "完成", "completed", "implemented", "implemented", "fix", "修复", "persistence", "持久化", "MCP", "SQLite"}
+
+	for _, msg := range chatResp.Result {
+		if msg.Role == "assistant" {
+			content := msg.Content
+			for _, keyword := range harnessKeywords {
+				if strings.Contains(strings.ToLower(content), strings.ToLower(keyword)) {
+					progressMessages = append(progressMessages, content)
+					break
+				}
+			}
+		}
+	}
+
+	if len(progressMessages) == 0 {
+		return "No harness progress found."
+	}
+
+	// Format and return
+	var builder strings.Builder
+	builder.WriteString("📊 **Harness Progress Report**\n\n")
+
+	for i, msg := range progressMessages {
+		builder.WriteString(fmt.Sprintf("**%d.** %s\n\n", i+1, msg))
+
+		// Limit to avoid huge messages
+		if i >= count-1 {
+			break
+		}
+	}
+
+	return builder.String()
+}
+
+// startTypingLoop sends a "typing" indicator every 4 seconds until the
+// returned stop channel is closed.
+func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+				b.api.Send(typing)
+			}
+		}
+	}()
+	return stop
+}
+
+func isBackgroundMessage(text string) bool {
+	lower := strings.ToLower(text)
+	patterns := []string{"harness-loop", "/harness", "centurion"}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHarnessStatusQuery(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return lower == "harness status" || lower == "/harness_status"
+}
+
 // handleTextGateway forwards messages to the mini-claude-bot gateway.
 // No single-chat restriction — each chat_id gets its own isolated session.
 func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message) {
+	// Check harness status query first
+	if isHarnessStatusQuery(text) {
+		b.handleHarnessStatus(chatID)
+		return
+	}
+
+	// Check if this is a background message
+	if isBackgroundMessage(text) {
+		b.handleBackgroundMessage(chatID, text)
+		return
+	}
+
+	// Regular message flow
 	typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
 	b.api.Send(typing)
 
@@ -144,17 +300,77 @@ func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message
 	username := msg.From.UserName
 
 	go func() {
+		stopTyping := b.startTypingLoop(chatID)
 		response, err := b.gateway.Send(chatIDStr, text, userID, username)
+		close(stopTyping)
 		if err != nil {
-			b.send(chatID, fmt.Sprintf("Error: %v", err))
+			b.send(chatID, fmt.Sprintf("Error: gateway request failed: %v", err))
 			return
 		}
+		// Only treat actual empty string as "empty response"
 		if response == "" {
 			b.send(chatID, "(empty response)")
 			return
 		}
-		b.sendLong(chatID, response)
+		// Don't send empty response if it's an error message or has content
+		if response != "" {
+			b.sendLong(chatID, response)
+		}
 	}()
+}
+
+func (b *Bot) handleBackgroundMessage(chatID int64, text string) {
+	chatIDStr := fmt.Sprintf("%d", chatID)
+
+	typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+	b.api.Send(typing)
+
+	result, err := b.gateway.SendBackground(chatIDStr, text, b.api.Token)
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Error starting background task: %v", err))
+		return
+	}
+
+	if result.Status == "rejected" {
+		b.send(chatID, fmt.Sprintf("Background task rejected: %s", result.Reason))
+		return
+	}
+
+	b.send(chatID, "Started in background. You can keep chatting. I'll send results when done.")
+}
+
+func (b *Bot) handleHarnessStatus(chatID int64) {
+	chatIDStr := fmt.Sprintf("%d", chatID)
+
+	status, err := b.gateway.GetBackgroundStatus(chatIDStr)
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Error getting status: %v", err))
+		return
+	}
+
+	switch status.Status {
+	case "idle":
+		b.send(chatID, "No background task running.")
+	case "running":
+		elapsed := int(status.ElapsedSeconds)
+		mins := elapsed / 60
+		secs := elapsed % 60
+		preview := status.Message
+		if len(preview) > 100 {
+			preview = preview[:100] + "..."
+		}
+		b.send(chatID, fmt.Sprintf("Background task running (%dm%ds elapsed)\nMessage: %s", mins, secs, preview))
+	case "completed":
+		preview := status.Result
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		b.send(chatID, fmt.Sprintf("Last background task completed.\nResult: %s", preview))
+	case "failed":
+		b.send(chatID, fmt.Sprintf("Last background task failed.\nResult: %s", status.Result))
+	default:
+		b.send(chatID, fmt.Sprintf("Background status: %s", status.Status))
+	}
 }
 
 // handleTextLocal is the original single-session behavior.
