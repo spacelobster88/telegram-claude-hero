@@ -30,7 +30,7 @@ func main() {
 		fmt.Println("Token saved.")
 	}
 
-	bot, err := NewBot(cfg.TelegramBotToken, cfg.GatewayURL)
+	bot, err := NewBot(cfg.TelegramBotToken, cfg.GatewayURL, cfg.BotID)
 	if err != nil {
 		log.Fatalf("Error creating bot: %v", err)
 	}

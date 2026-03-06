@@ -5,20 +5,59 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 )
+
+const (
+	maxRetries    = 5
+	retryBaseWait = 1 * time.Second
+)
+
+// isTransientError returns true for errors caused by server restarts (EOF, connection refused/reset).
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset")
+}
+
+// doWithRetry executes an HTTP request function with retry on transient errors.
+func doWithRetry(fn func() (*http.Response, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		resp, err := fn()
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !isTransientError(err) || attempt == maxRetries {
+			return nil, err
+		}
+		wait := retryBaseWait * time.Duration(1<<uint(attempt))
+		log.Printf("[gateway] transient error (attempt %d/%d), retrying in %v: %v", attempt+1, maxRetries, wait, err)
+		time.Sleep(wait)
+	}
+	return nil, lastErr
+}
 
 // GatewayClient forwards messages to the mini-claude-bot gateway API
 // instead of spawning Claude CLI directly.
 type GatewayClient struct {
 	baseURL    string
+	botID      string // multi-tenant isolation identifier
 	httpClient *http.Client
 }
 
 type gatewaySendRequest struct {
 	ChatID   string `json:"chat_id"`
 	Message  string `json:"message"`
+	BotID    string `json:"bot_id,omitempty"`
 	UserID   string `json:"user_id,omitempty"`
 	Username string `json:"username,omitempty"`
 }
@@ -28,11 +67,12 @@ type gatewaySendResponse struct {
 	SessionKey string `json:"session_key"`
 }
 
-func NewGatewayClient(baseURL string) *GatewayClient {
+func NewGatewayClient(baseURL string, botID string) *GatewayClient {
 	return &GatewayClient{
 		baseURL: baseURL,
+		botID:   botID,
 		httpClient: &http.Client{
-			Timeout: 16 * time.Minute, // longer than server-side Claude timeout (15min)
+			Timeout: 30 * time.Minute, // allow time for OOM retries (was 16min)
 			Transport: &http.Transport{
 				DisableKeepAlives: true, // prevent EOF on stale keep-alive connections
 			},
@@ -44,6 +84,7 @@ func (g *GatewayClient) Send(chatID, message, userID, username string) (string, 
 	body, err := json.Marshal(gatewaySendRequest{
 		ChatID:   chatID,
 		Message:  message,
+		BotID:    g.botID,
 		UserID:   userID,
 		Username: username,
 	})
@@ -51,11 +92,13 @@ func (g *GatewayClient) Send(chatID, message, userID, username string) (string, 
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := g.httpClient.Post(
-		g.baseURL+"/api/gateway/send",
-		"application/json",
-		bytes.NewReader(body),
-	)
+	resp, err := doWithRetry(func() (*http.Response, error) {
+		return g.httpClient.Post(
+			g.baseURL+"/api/gateway/send",
+			"application/json",
+			bytes.NewReader(body),
+		)
+	})
 	if err != nil {
 		return "", fmt.Errorf("gateway request failed: %w", err)
 	}
@@ -82,6 +125,7 @@ type gatewayBackgroundRequest struct {
 	ChatID   string `json:"chat_id"`
 	Message  string `json:"message"`
 	BotToken string `json:"bot_token"`
+	BotID    string `json:"bot_id,omitempty"`
 }
 
 type gatewayBackgroundResponse struct {
@@ -102,16 +146,19 @@ func (g *GatewayClient) SendBackground(chatID, message, botToken string) (*gatew
 		ChatID:   chatID,
 		Message:  message,
 		BotToken: botToken,
+		BotID:    g.botID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := g.httpClient.Post(
-		g.baseURL+"/api/gateway/send-background",
-		"application/json",
-		bytes.NewReader(body),
-	)
+	resp, err := doWithRetry(func() (*http.Response, error) {
+		return g.httpClient.Post(
+			g.baseURL+"/api/gateway/send-background",
+			"application/json",
+			bytes.NewReader(body),
+		)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("background request failed: %w", err)
 	}
@@ -131,7 +178,7 @@ func (g *GatewayClient) SendBackground(chatID, message, botToken string) (*gatew
 }
 
 func (g *GatewayClient) GetBackgroundStatus(chatID string) (*gatewayBackgroundStatus, error) {
-	resp, err := g.httpClient.Get(g.baseURL + "/api/gateway/background-status/" + chatID)
+	resp, err := g.httpClient.Get(g.baseURL + "/api/gateway/background-status/" + chatID + "?bot_id=" + g.botID)
 	if err != nil {
 		return nil, fmt.Errorf("status request failed: %w", err)
 	}
@@ -151,7 +198,7 @@ func (g *GatewayClient) GetBackgroundStatus(chatID string) (*gatewayBackgroundSt
 }
 
 func (g *GatewayClient) Stop(chatID string) error {
-	body, _ := json.Marshal(map[string]string{"chat_id": chatID})
+	body, _ := json.Marshal(map[string]string{"chat_id": chatID, "bot_id": g.botID})
 	resp, err := g.httpClient.Post(
 		g.baseURL+"/api/gateway/stop",
 		"application/json",

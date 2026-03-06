@@ -12,6 +12,8 @@ import (
 type Config struct {
 	TelegramBotToken string `json:"telegram_bot_token"`
 	GatewayURL       string `json:"gateway_url,omitempty"`
+	BotID            string `json:"bot_id,omitempty"`
+	OpenAIAPIKey     string `json:"openai_api_key,omitempty"`
 }
 
 func ConfigPath() (string, error) {
@@ -44,6 +46,16 @@ func LoadConfig() (*Config, error) {
 	// Env var override for gateway mode
 	if envURL := os.Getenv("GATEWAY_URL"); envURL != "" {
 		cfg.GatewayURL = envURL
+	}
+
+	// Env var override for bot ID (multi-tenant isolation)
+	if envBotID := os.Getenv("BOT_ID"); envBotID != "" {
+		cfg.BotID = envBotID
+	}
+
+	// Env var override for OpenAI API key
+	if envKey := os.Getenv("OPENAI_API_KEY"); envKey != "" {
+		cfg.OpenAIAPIKey = envKey
 	}
 
 	return &cfg, nil
