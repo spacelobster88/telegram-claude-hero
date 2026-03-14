@@ -452,35 +452,39 @@ func (b *Bot) handleHarnessStatus(chatID int64) {
 	}
 
 	var sb strings.Builder
+	h := status.Harness
 
 	// Header with background status
 	switch status.BgStatus {
 	case "idle":
-		sb.WriteString("No background task running.\n")
+		if h == nil {
+			b.send(chatID, "No background task running.")
+			return
+		}
+		// Has harness data — skip the misleading "idle" header, show progress below
 	case "running":
 		elapsed := int(status.ElapsedSeconds)
-		sb.WriteString(fmt.Sprintf("Background task running (%dm%ds elapsed", elapsed/60, elapsed%60))
+		sb.WriteString(fmt.Sprintf("Running (%dm%ds elapsed", elapsed/60, elapsed%60))
 		if status.ChainDepth > 0 {
 			sb.WriteString(fmt.Sprintf(", chain #%d", status.ChainDepth))
 		}
 		sb.WriteString(")\n")
 	case "completed":
-		sb.WriteString("Background task completed.\n")
+		sb.WriteString("Last batch completed.\n")
 	case "failed":
-		sb.WriteString("Background task failed.\n")
+		sb.WriteString("Last batch failed.\n")
 	}
 
 	// Harness progress
-	h := status.Harness
 	if h == nil {
 		if status.CWD != "" {
-			sb.WriteString(fmt.Sprintf("\nCWD: %s\nNo .harness/tasks.json found.", status.CWD))
+			sb.WriteString(fmt.Sprintf("CWD: %s\nNo .harness/tasks.json found.", status.CWD))
 		}
 		b.send(chatID, sb.String())
 		return
 	}
 
-	sb.WriteString(fmt.Sprintf("\nProject: %s\n", h.ProjectName))
+	sb.WriteString(fmt.Sprintf("Project: %s\n", h.ProjectName))
 	sb.WriteString(fmt.Sprintf("Phase: %s\n", h.CurrentPhase))
 	sb.WriteString(fmt.Sprintf("Progress: %d/%d done", h.Done, h.Total))
 	if h.InProgress > 0 {
