@@ -220,7 +220,6 @@ type gatewayBackgroundRequest struct {
 	Message  string `json:"message"`
 	BotToken string `json:"bot_token"`
 	BotID    string `json:"bot_id,omitempty"`
-	PlanID    string `json:"plan_id,omitempty"`
 }
 
 type gatewayBackgroundResponse struct {

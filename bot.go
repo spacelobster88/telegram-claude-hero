@@ -1,16 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,26 +15,12 @@ import (
 
 const maxMessageLen = 4096
 
-type PendingPlan struct {
-	ID        string
-	Plan      string
-	CreatedAt time.Time
-}
-
-type WaitingForSelection struct {
-	ChatID     int64
-	Plans      []PendingPlan
-	ExpiryTime time.Time
-}
-
 type Bot struct {
-	api               *tgbotapi.BotAPI
-	session           *Session   // only used in local mode
-	activeChatID      int64      // only used in local mode
-	mu                sync.Mutex
-	gateway           *GatewayClient // nil in local mode
-	pendingPlans      map[int64][]PendingPlan      // chat_id -> pending plans
-	selectionWaiters  map[int64]WaitingForSelection // chat_id -> waiting state
+	api          *tgbotapi.BotAPI
+	session      *Session       // only used in local mode
+	activeChatID int64          // only used in local mode
+	mu           sync.Mutex
+	gateway      *GatewayClient // nil in local mode
 }
 
 func NewBot(token string, gatewayURL string, botID string) (*Bot, error) {
@@ -55,9 +36,7 @@ func NewBot(token string, gatewayURL string, botID string) (*Bot, error) {
 	}
 
 	b := &Bot{
-		api:              api,
-		pendingPlans:     make(map[int64][]PendingPlan),
-		selectionWaiters: make(map[int64]WaitingForSelection),
+		api: api,
 	}
 	if gatewayURL != "" {
 		b.gateway = NewGatewayClient(gatewayURL, botID)
@@ -113,15 +92,6 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	case "purge":
 		b.handlePurge(chatID)
-		return
-	case "confirm":
-		b.handleConfirmCommand(chatID, msg.CommandArguments())
-		return
-	case "background":
-		b.handleExecCommand(chatID, msg, true)
-		return
-	case "foreground", "fg":
-		b.handleExecCommand(chatID, msg, false)
 		return
 	}
 
@@ -183,9 +153,6 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "stop", Description: "停止会话 / Stop session"},
 		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
 		tgbotapi.BotCommand{Command: "purge", Description: "清理系统内存 / Purge system memory"},
-		tgbotapi.BotCommand{Command: "background", Description: "后台运行 / Run in background"},
-		tgbotapi.BotCommand{Command: "foreground", Description: "前台运行 / Run in foreground"},
-		tgbotapi.BotCommand{Command: "confirm", Description: "确认计划 / Confirm plan"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("Warning: failed to register bot commands: %v", err)
@@ -256,298 +223,22 @@ func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
 	return stop
 }
 
-// generatePlanID generates a short unique plan ID
-func generatePlanID() string {
-	return strings.ToUpper(fmt.Sprintf("%06x", time.Now().UnixNano()&0xffffff))
-}
-
-// fmtDuration formats a duration for display
-func fmtDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%d秒", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%d分钟", int(d.Minutes()))
-	}
-	return fmt.Sprintf("%d小时", int(d.Hours()))
-}
-
-// promptForPlanSelection displays pending plans for user selection
-func (b *Bot) promptForPlanSelection(chatID int64, plans []PendingPlan) {
-	builder := strings.Builder{}
-	builder.WriteString("🤔 检测到多个待确认的计划，请选择要执行哪一个：\n\n")
-
-	for i, plan := range plans {
-		elapsed := time.Since(plan.CreatedAt)
-		timeStr := fmtDuration(elapsed)
-
-		builder.WriteString(fmt.Sprintf(
-			"   %d️⃣ #%s - %s\n      创建时间：%s\n\n",
-			i+1, plan.ID, plan.Plan[:50], timeStr,
-		))
-	}
-
-	builder.WriteString("📌 快速选择：\n")
-	for i := range plans {
-		builder.WriteString(fmt.Sprintf(
-			"   • 输入 %d 选择 #%s\n", i+1, plans[i].ID,
-		))
-	}
-
-	builder.WriteString("\n   • 输入 /confirm #ID 选择指定 plan\n")
-	builder.WriteString("   • 输入 /confirm latest 选择最新的\n")
-
-	b.send(chatID, builder.String())
-
-	// Set waiting state
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.selectionWaiters[chatID] = WaitingForSelection{
-		ChatID:     chatID,
-		Plans:       plans,
-		ExpiryTime: time.Now().Add(5 * time.Minute), // 5 minutes
-	}
-	log.Printf("[bot] Set waiting for plan selection for chat=%d (plans=%d)", chatID, len(plans))
-}
-
-// getPendingPlans retrieves all pending plans for a chat
-func (b *Bot) getPendingPlans(chatID int64) []PendingPlan {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.pendingPlans[chatID]
-}
-
-// addPendingPlan adds a new pending plan
-func (b *Bot) addPendingPlan(chatID int64, plan PendingPlan) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.pendingPlans[chatID] = append(b.pendingPlans[chatID], plan)
-	log.Printf("[bot] Added pending plan #%s for chat=%d", plan.ID, chatID)
-}
-
-// clearPendingPlans clears all pending plans for a chat
-func (b *Bot) clearPendingPlans(chatID int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.pendingPlans, chatID)
-	log.Printf("[bot] Cleared pending plans for chat=%d", chatID)
-}
-
-// handleConfirmCommand processes /confirm command
-func (b *Bot) handleConfirmCommand(chatID int64, args string) {
-	args = strings.TrimSpace(args)
-
-	// Check if user is selecting by number
-	if waiter, ok := b.selectionWaiters[chatID]; ok {
-		if !time.Now().After(waiter.ExpiryTime) {
-			// Expired, remove it
-			delete(b.selectionWaiters, chatID)
-		} else {
-			// Try to parse as number
-			num, err := strconv.Atoi(args)
-			if err == nil && num >= 1 && num <= len(waiter.Plans) {
-				// User selected by number
-				plan := waiter.Plans[num-1]
-				log.Printf("[bot] User selected plan #%s by number %d", plan.ID, num)
-				delete(b.selectionWaiters, chatID)
-				b.executeBackgroundTask(chatID, plan.ID, plan.Plan)
-				return
-			}
-		}
-	}
-
-	// Get pending plans
-	plans := b.getPendingPlans(chatID)
-
-	// No plans
-	if len(plans) == 0 {
-		b.send(chatID, "❓ 没有待确认的计划。请先提交任务（例如：按照 harness-loop 执行升级）")
-		return
-	}
-
-	// Case 1: /confirm latest or no args -> confirm latest
-	if args == "" || strings.ToLower(args) == "latest" {
-		plan := plans[len(plans)-1]
-		log.Printf("[bot] Confirming latest plan #%s", plan.ID)
-		b.executeBackgroundTask(chatID, plan.ID, plan.Plan)
-		return
-	}
-
-	// Case 2: /confirm #ID -> confirm specific plan
-	planID := strings.TrimPrefix(args, "#")
-	planID = strings.ToUpper(strings.TrimSpace(planID))
-
-	for _, plan := range plans {
-		if plan.ID == planID {
-			log.Printf("[bot] Confirming plan #%s", planID)
-			b.executeBackgroundTask(chatID, plan.ID, plan.Plan)
-			return
-		}
-	}
-
-	// Plan not found
-	b.send(chatID, fmt.Sprintf("❓ 未找到计划 #%s", planID))
-}
-
-// executeBackgroundTask executes a plan in background
-func (b *Bot) executeBackgroundTask(chatID int64, planID string, planText string) {
+// startBackgroundExecution sends a message to the gateway's background endpoint.
+func (b *Bot) startBackgroundExecution(chatID int64, message string) {
 	chatIDStr := fmt.Sprintf("%d", chatID)
 
-	typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
-	b.api.Send(typing)
-
-	// Create request with plan ID included
-	body, err := json.Marshal(gatewayBackgroundRequest{
-		ChatID:   chatIDStr,
-		Message:  planText,
-		BotToken: b.api.Token,
-		BotID:    b.gateway.botID,
-		PlanID:   planID,
-	})
-	if err != nil {
-		b.send(chatID, fmt.Sprintf("Error marshaling request: %v", err))
-		return
-	}
-
-	resp, err := doWithRetry(func() (*http.Response, error) {
-		return b.gateway.httpClient.Post(
-			b.gateway.baseURL+"/api/gateway/send-background",
-			"application/json",
-			bytes.NewBuffer(body),
-		)
-	})
+	resp, err := b.gateway.SendBackground(chatIDStr, message, b.api.Token)
 	if err != nil {
 		b.send(chatID, fmt.Sprintf("Error starting background task: %v", err))
 		return
 	}
-	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		b.send(chatID, fmt.Sprintf("Error reading response: %v", err))
+	if resp.Status == "rejected" {
+		b.send(chatID, fmt.Sprintf("Background task rejected: %s", resp.Reason))
 		return
 	}
 
-	var result gatewayBackgroundResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		b.send(chatID, fmt.Sprintf("Error parsing response: %v", err))
-		return
-	}
-
-	if result.Status == "rejected" {
-		b.send(chatID, fmt.Sprintf("Background task rejected: %s", result.Reason))
-		return
-	}
-
-	// Remove confirmed plan from pending
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	plans := b.pendingPlans[chatID]
-	for i, p := range plans {
-		if p.ID == planID {
-			b.pendingPlans[chatID] = append(plans[:i], plans[i+1:]...)
-			log.Printf("[bot] Removed confirmed plan #%s from pending", planID)
-			break
-		}
-	}
-
-	b.send(chatID, fmt.Sprintf("✅ 已选择 Plan #%s，正在后台执行...\n任务完成后会通知你。", planID))
-}
-
-// handleExecCommand handles /background or /foreground with optional combined args
-// e.g. /background parallel long, /foreground parallel short
-func (b *Bot) handleExecCommand(chatID int64, msg *tgbotapi.Message, isBackground bool) {
-	args := strings.Fields(strings.ToLower(msg.CommandArguments()))
-	if len(args) == 0 {
-		// No args — fall through to original interactive flow
-		b.handleBackgroundChoice(chatID, isBackground)
-		return
-	}
-
-	// Parse combined flags
-	useParallel := false
-	isLong := false
-	hasParallel := false
-	hasDuration := false
-	for _, arg := range args {
-		switch arg {
-		case "parallel", "para":
-			useParallel = true
-			hasParallel = true
-		case "noparallel", "nopara":
-			useParallel = false
-			hasParallel = true
-		case "long":
-			isLong = true
-			hasDuration = true
-		case "short":
-			isLong = false
-			hasDuration = true
-		default:
-			b.send(chatID, fmt.Sprintf("⚠️ 未知参数: %s\n\n可用参数: parallel, noparallel, long, short", arg))
-			return
-		}
-	}
-
-	plans := b.getPendingPlans(chatID)
-	if len(plans) == 0 {
-		b.send(chatID, "❓ 没有待确认的计划。请先提交任务。")
-		return
-	}
-
-	plan := plans[len(plans)-1]
-
-	// Build status message
-	mode := "后台"
-	if !isBackground {
-		mode = "前台"
-	}
-	parts := []string{fmt.Sprintf("✅ %s运行", mode)}
-	if hasParallel {
-		if useParallel {
-			parts = append(parts, "并行 (Centurion)")
-		} else {
-			parts = append(parts, "不并行")
-		}
-	}
-	if hasDuration {
-		if isLong {
-			parts = append(parts, "长任务")
-		} else {
-			parts = append(parts, "短任务")
-		}
-	}
-	b.send(chatID, strings.Join(parts, " | "))
-
-	// Always execute as background task
-	b.executeBackgroundTask(chatID, plan.ID, plan.Plan)
-}
-
-// handleBackgroundChoice handles /background or /foreground command (no args)
-func (b *Bot) handleBackgroundChoice(chatID int64, isBackground bool) {
-	plans := b.getPendingPlans(chatID)
-	if len(plans) == 0 {
-		b.send(chatID, "❓ 没有待确认的计划。请先提交任务。")
-		return
-	}
-
-	plan := plans[len(plans)-1]
-	b.executeBackgroundTask(chatID, plan.ID, plan.Plan)
-}
-
-
-// cleanupExpiredSelections removes expired selection waiters
-func (b *Bot) cleanupExpiredSelections() {
-	now := time.Now()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	for chatID, waiter := range b.selectionWaiters {
-		if now.After(waiter.ExpiryTime) {
-			delete(b.selectionWaiters, chatID)
-			log.Printf("[bot] Cleaned expired selection waiter for chat=%d", chatID)
-		}
-	}
+	log.Printf("[bot] Background execution started for chat=%d", chatID)
 }
 
 // sendStreamingToTelegram uses SendStream to display Claude's response with
@@ -632,10 +323,8 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 		}
 
 		b.send(chatID, "🚀 Plan confirmed. Starting background execution...")
-		planID := generatePlanID()
 		execPrompt := "Resume the harness-loop. The plan has been confirmed. Enter the Execute Loop now. Execute all tasks following the harness-loop skill instructions."
-		b.addPendingPlan(chatID, PendingPlan{ID: planID, Plan: execPrompt, CreatedAt: time.Now()})
-		b.executeBackgroundTask(chatID, planID, execPrompt)
+		b.startBackgroundExecution(chatID, execPrompt)
 		return
 	}
 
@@ -663,20 +352,6 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 // handleTextGateway forwards messages to the mini-claude-bot gateway.
 // No single-chat restriction — each chat_id gets its own isolated session.
 func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message) {
-	// Check if waiting for plan selection (single check)
-	if waiter, ok := b.selectionWaiters[chatID]; ok {
-		if !time.Now().After(waiter.ExpiryTime) {
-			num, err := strconv.Atoi(text)
-			if err == nil && num >= 1 && num <= len(waiter.Plans) {
-				plan := waiter.Plans[num-1]
-				log.Printf("[bot] User selected plan #%s by number %d", plan.ID, num)
-				delete(b.selectionWaiters, chatID)
-				b.executeBackgroundTask(chatID, plan.ID, plan.Plan)
-				return
-			}
-		}
-	}
-
 	// If this is a reply to another message, prepend the quoted context
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
 		text = fmt.Sprintf("[Replying to: \"%s\"]\n\n%s", msg.ReplyToMessage.Text, text)
