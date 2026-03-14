@@ -315,8 +315,15 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 	close(stopTyping)
 
 	if err != nil {
-		b.send(chatID, fmt.Sprintf("Error: %v", err))
-		return
+		log.Printf("[stream] SSE failed for chat=%d: %v — falling back to non-streaming", chatID, err)
+		// Fallback: retry via non-streaming Send() so the user gets a response
+		fallbackResp, fallbackErr := b.gateway.Send(chatIDStr, text, userID, username)
+		if fallbackErr != nil {
+			b.send(chatID, fmt.Sprintf("Error: %v", fallbackErr))
+			return
+		}
+		response = fallbackResp
+		err = nil
 	}
 
 	if response == "" {
