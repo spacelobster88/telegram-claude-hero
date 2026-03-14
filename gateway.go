@@ -92,8 +92,25 @@ func (g *GatewayClient) Send(chatID, message, userID, username string) (string, 
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
+	// Check if this is a background session (chat_id starts with "bg-")
+	isBackgroundSession := strings.HasPrefix(chatID, "bg-")
+
+	// Use appropriate timeout: no timeout for background sessions
+	var client *http.Client
+	if isBackgroundSession {
+		client = &http.Client{
+			Timeout: 0, // no timeout for background sessions
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+			},
+		}
+		log.Printf("[gateway] Using no timeout for background session %s", chatID)
+	} else {
+		client = g.httpClient // default 30min timeout
+	}
+
 	resp, err := doWithRetry(func() (*http.Response, error) {
-		return g.httpClient.Post(
+		return client.Post(
 			g.baseURL+"/api/gateway/send",
 			"application/json",
 			bytes.NewReader(body),
@@ -126,6 +143,7 @@ type gatewayBackgroundRequest struct {
 	Message  string `json:"message"`
 	BotToken string `json:"bot_token"`
 	BotID    string `json:"bot_id,omitempty"`
+	PlanID    string `json:"plan_id,omitempty"`
 }
 
 type gatewayBackgroundResponse struct {
