@@ -232,108 +232,6 @@ func (b *Bot) handleStart(chatID int64, msg *tgbotapi.Message) {
 	b.send(chatID, "Session started. Send me your prompts!")
 }
 
-// handleHarnessQuery queries harness progress from chat history
-func (b *Bot) handleHarnessQuery(chatID int64, msg *tgbotapi.Message) {
-	count := 5
-	args := msg.CommandArguments()
-	if len(args) > 0 {
-		if n, err := strconv.Atoi(string(args[0])); err == nil && n > 0 && n <= 20 {
-			count = n
-		}
-	}
-
-	b.send(chatID, fmt.Sprintf("🔍 Querying last %d harness progress messages...", count))
-
-	go func() {
-		progress := b.queryHarnessProgress(count)
-		if progress == "" {
-			b.send(chatID, "No harness progress found in recent messages.")
-		} else {
-			b.sendLong(chatID, progress)
-		}
-	}()
-}
-
-// queryHarnessProgress fetches recent assistant messages from mini-claude-bot
-// and extracts harness progress information
-func (b *Bot) queryHarnessProgress(count int) string {
-	if b.gateway == nil {
-		return "[ERROR] Harness progress requires gateway mode"
-	}
-
-	url := b.gateway.baseURL + "/api/chat/search?limit=" + strconv.Itoa(count*10)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		log.Printf("Failed to fetch chat history: %v", err)
-		return fmt.Sprintf("[ERROR] Failed to fetch progress: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Sprintf("[ERROR] Gateway returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Sprintf("[ERROR] Failed to read response: %v", err)
-	}
-
-	type chatMessage struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-
-	type chatResponse struct {
-		Result []chatMessage `json:"result"`
-	}
-
-	var chatResp chatResponse
-	if err := json.Unmarshal(body, &chatResp); err != nil {
-		log.Printf("Failed to parse chat response: %v", err)
-		return fmt.Sprintf("[ERROR] Failed to parse response: %v", err)
-	}
-
-	if len(chatResp.Result) == 0 {
-		return "No harness progress found."
-	}
-
-	// Collect harness-related messages (assistant messages containing progress keywords)
-	var progressMessages []string
-	harnessKeywords := []string{"harness", "progress", "phase", "阶段", "进度", "task", "任务", "完成", "completed", "implemented", "implemented", "fix", "修复", "persistence", "持久化", "MCP", "SQLite"}
-
-	for _, msg := range chatResp.Result {
-		if msg.Role == "assistant" {
-			content := msg.Content
-			for _, keyword := range harnessKeywords {
-				if strings.Contains(strings.ToLower(content), strings.ToLower(keyword)) {
-					progressMessages = append(progressMessages, content)
-					break
-				}
-			}
-		}
-	}
-
-	if len(progressMessages) == 0 {
-		return "No harness progress found."
-	}
-
-	// Format and return
-	var builder strings.Builder
-	builder.WriteString("📊 **Harness Progress Report**\n\n")
-
-	for i, msg := range progressMessages {
-		builder.WriteString(fmt.Sprintf("**%d.** %s\n\n", i+1, msg))
-
-		// Limit to avoid huge messages
-		if i >= count-1 {
-			break
-		}
-	}
-
-	return builder.String()
-}
-
 // startTypingLoop sends a "typing" indicator every 4 seconds until the
 // returned stop channel is closed.
 func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
@@ -341,9 +239,13 @@ func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
 	go func() {
 		ticker := time.NewTicker(4 * time.Second)
 		defer ticker.Stop()
+		timeout := time.NewTimer(10 * time.Minute)
+		defer timeout.Stop()
 		for {
 			select {
 			case <-stop:
+				return
+			case <-timeout.C:
 				return
 			case <-ticker.C:
 				typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
@@ -352,56 +254,6 @@ func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
 		}
 	}()
 	return stop
-}
-
-// isBackgroundMessage checks if a message should run in background.
-// Must contain BOTH an action word AND a project keyword
-func isBackgroundMessage(text string) bool {
-	lower := strings.ToLower(text)
-
-	// Must contain BOTH an action word AND a project keyword
-	actionWords := []string{
-		"执行", "开始", "启动", "运行", "部署",
-		"go ", "start ", "run ", "execute", "deploy", "build",
-		"按照", "用harness", "launch",
-	}
-	projectKeywords := []string{
-		"harness-loop", "harness loop",
-		"后台模式", "后台运行", "后台执行",
-	}
-
-	hasAction := false
-	hasProject := false
-
-	for _, a := range actionWords {
-		if strings.Contains(lower, a) {
-			hasAction = true
-			break
-		}
-	}
-	for _, p := range projectKeywords {
-		if strings.Contains(lower, p) {
-			hasProject = true
-			break
-		}
-	}
-
-	return hasAction && hasProject
-}
-
-// isHarnessLoopTask checks if message is a harness-loop task
-func isHarnessLoopTask(text string) bool {
-	lower := strings.ToLower(text)
-	harnessKeywords := []string{
-		"harness-loop", "harness loop",
-		"后台模式", "后台运行", "后台执行",
-	}
-	for _, keyword := range harnessKeywords {
-		if strings.Contains(lower, keyword) {
-			return true
-		}
-	}
-	return false
 }
 
 // generatePlanID generates a short unique plan ID
@@ -698,6 +550,116 @@ func (b *Bot) cleanupExpiredSelections() {
 	}
 }
 
+// sendStreamingToTelegram uses SendStream to display Claude's response with
+// edit-in-place updates in Telegram.
+func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, username string) {
+	stopTyping := b.startTypingLoop(chatID)
+
+	var msgID int // Telegram message ID for editing
+	var accumulated strings.Builder
+	var lastEditTime time.Time
+	const editThrottle = 3 * time.Second
+	thinkingShown := false
+
+	response, err := b.gateway.SendStream(chatIDStr, text, userID, username, func(eventType, content string) {
+		switch eventType {
+		case "thinking":
+			if !thinkingShown {
+				// Send initial "Thinking..." message and capture message_id
+				msg := tgbotapi.NewMessage(chatID, "💭 Thinking...")
+				sent, sendErr := b.api.Send(msg)
+				if sendErr == nil {
+					msgID = sent.MessageID
+					thinkingShown = true
+				}
+			}
+		case "text":
+			accumulated.WriteString(content)
+			now := time.Now()
+			// Throttle edits to 1 per 3 seconds
+			if msgID != 0 && now.Sub(lastEditTime) >= editThrottle {
+				currentText := accumulated.String()
+				if len(currentText) > 4000 {
+					currentText = currentText[:4000] + "..."
+				}
+				edit := tgbotapi.NewEditMessageText(chatID, msgID, currentText)
+				b.api.Send(edit)
+				lastEditTime = now
+			} else if msgID == 0 {
+				// No thinking phase — send first message with text
+				msg := tgbotapi.NewMessage(chatID, content)
+				sent, sendErr := b.api.Send(msg)
+				if sendErr == nil {
+					msgID = sent.MessageID
+					lastEditTime = now
+				}
+			}
+		}
+	})
+
+	close(stopTyping)
+
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Error: %v", err))
+		return
+	}
+
+	if response == "" {
+		if msgID != 0 {
+			edit := tgbotapi.NewEditMessageText(chatID, msgID, "(empty response)")
+			b.api.Send(edit)
+		} else {
+			b.send(chatID, "(empty response)")
+		}
+		return
+	}
+
+	// Check for HARNESS_EXEC_READY marker
+	const execReadyMarker = "[HARNESS_EXEC_READY]"
+	if strings.Contains(response, execReadyMarker) {
+		cleanResponse := strings.ReplaceAll(response, execReadyMarker, "")
+		cleanResponse = strings.TrimSpace(cleanResponse)
+		if msgID != 0 {
+			if len(cleanResponse) <= 4096 {
+				edit := tgbotapi.NewEditMessageText(chatID, msgID, markdownToTelegramHTML(cleanResponse))
+				edit.ParseMode = tgbotapi.ModeHTML
+				b.api.Send(edit)
+			} else {
+				b.sendLong(chatID, cleanResponse)
+			}
+		} else if cleanResponse != "" {
+			b.sendLong(chatID, cleanResponse)
+		}
+
+		b.send(chatID, "🚀 Plan confirmed. Starting background execution...")
+		planID := generatePlanID()
+		execPrompt := "Resume the harness-loop. The plan has been confirmed. Enter the Execute Loop now. Execute all tasks following the harness-loop skill instructions."
+		b.addPendingPlan(chatID, PendingPlan{ID: planID, Plan: execPrompt, CreatedAt: time.Now()})
+		b.executeBackgroundTask(chatID, planID, execPrompt)
+		return
+	}
+
+	// Final edit with complete response
+	if msgID != 0 {
+		if len(response) <= 4096 {
+			html := markdownToTelegramHTML(response)
+			edit := tgbotapi.NewEditMessageText(chatID, msgID, html)
+			edit.ParseMode = tgbotapi.ModeHTML
+			edit.DisableWebPagePreview = true
+			if _, editErr := b.api.Send(edit); editErr != nil {
+				// Fallback to plain text edit
+				edit2 := tgbotapi.NewEditMessageText(chatID, msgID, response)
+				b.api.Send(edit2)
+			}
+		} else {
+			// Response too long for single edit — delete thinking msg and send fresh
+			b.sendLong(chatID, response)
+		}
+	} else {
+		b.sendLong(chatID, response)
+	}
+}
+
 // handleTextGateway forwards messages to the mini-claude-bot gateway.
 // No single-chat restriction — each chat_id gets its own isolated session.
 func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message) {
@@ -729,98 +691,101 @@ func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message
 	username := msg.From.UserName
 
 	go func() {
-		stopTyping := b.startTypingLoop(chatID)
-		response, err := b.gateway.Send(chatIDStr, text, userID, username)
-		close(stopTyping)
-		if err != nil {
-			b.send(chatID, fmt.Sprintf("Error: gateway request failed: %v", err))
-			return
-		}
-
-		if response == "" {
-			b.send(chatID, "(empty response)")
-			return
-		}
-
-		// Auto-detect harness execution ready marker
-		const execReadyMarker = "[HARNESS_EXEC_READY]"
-		if strings.Contains(response, execReadyMarker) {
-			// Strip marker from response
-			cleanResponse := strings.ReplaceAll(response, execReadyMarker, "")
-			cleanResponse = strings.TrimSpace(cleanResponse)
-			if cleanResponse != "" {
-				b.sendLong(chatID, cleanResponse)
-			}
-
-			// Auto-start background execution
-			b.send(chatID, "🚀 Plan confirmed. Starting background execution...")
-			planID := generatePlanID()
-			execPrompt := "Resume the harness-loop. The plan has been confirmed. Enter the Execute Loop now. Execute all tasks following the harness-loop skill instructions."
-			b.addPendingPlan(chatID, PendingPlan{
-				ID:        planID,
-				Plan:      execPrompt,
-				CreatedAt: time.Now(),
-			})
-			b.executeBackgroundTask(chatID, planID, execPrompt)
-			return
-		}
-
-		b.sendLong(chatID, response)
+		b.sendStreamingToTelegram(chatID, chatIDStr, text, userID, username)
 	}()
-}
-
-func (b *Bot) handleBackgroundMessage(chatID int64, text string) {
-	chatIDStr := fmt.Sprintf("%d", chatID)
-
-	typing := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
-	b.api.Send(typing)
-
-	result, err := b.gateway.SendBackground(chatIDStr, text, b.api.Token)
-	if err != nil {
-		b.send(chatID, fmt.Sprintf("Error starting background task: %v", err))
-		return
-	}
-
-	if result.Status == "rejected" {
-		b.send(chatID, fmt.Sprintf("Background task rejected: %s", result.Reason))
-		return
-	}
-
-	b.send(chatID, "Started in background. You can keep chatting. I'll send results when done.")
 }
 
 func (b *Bot) handleHarnessStatus(chatID int64) {
 	chatIDStr := fmt.Sprintf("%d", chatID)
 
-	status, err := b.gateway.GetBackgroundStatus(chatIDStr)
+	status, err := b.gateway.GetHarnessStatus(chatIDStr)
 	if err != nil {
-		b.send(chatID, fmt.Sprintf("Error getting status: %v", err))
+		// Fallback to basic background status
+		bgStatus, bgErr := b.gateway.GetBackgroundStatus(chatIDStr)
+		if bgErr != nil {
+			b.send(chatID, fmt.Sprintf("Error getting status: %v", err))
+			return
+		}
+		switch bgStatus.Status {
+		case "idle":
+			b.send(chatID, "No background task running.")
+		case "running":
+			elapsed := int(bgStatus.ElapsedSeconds)
+			b.send(chatID, fmt.Sprintf("Background task running (%dm%ds elapsed)", elapsed/60, elapsed%60))
+		default:
+			b.send(chatID, fmt.Sprintf("Background status: %s", bgStatus.Status))
+		}
 		return
 	}
 
-	switch status.Status {
+	var sb strings.Builder
+
+	// Header with background status
+	switch status.BgStatus {
 	case "idle":
-		b.send(chatID, "No background task running.")
+		sb.WriteString("No background task running.\n")
 	case "running":
 		elapsed := int(status.ElapsedSeconds)
-		mins := elapsed / 60
-		secs := elapsed % 60
-		preview := status.Message
-		if len(preview) > 100 {
-			preview = preview[:100] + "..."
+		sb.WriteString(fmt.Sprintf("Background task running (%dm%ds elapsed", elapsed/60, elapsed%60))
+		if status.ChainDepth > 0 {
+			sb.WriteString(fmt.Sprintf(", chain #%d", status.ChainDepth))
 		}
-		b.send(chatID, fmt.Sprintf("Background task running (%dm%ds elapsed)\nMessage: %s", mins, secs, preview))
+		sb.WriteString(")\n")
 	case "completed":
-		preview := status.Result
-		if len(preview) > 200 {
-			preview = preview[:200] + "..."
-		}
-		b.send(chatID, fmt.Sprintf("Last background task completed.\nResult: %s", preview))
+		sb.WriteString("Background task completed.\n")
 	case "failed":
-		b.send(chatID, fmt.Sprintf("Last background task failed.\nResult: %s", status.Result))
-	default:
-		b.send(chatID, fmt.Sprintf("Background status: %s", status.Status))
+		sb.WriteString("Background task failed.\n")
 	}
+
+	// Harness progress
+	h := status.Harness
+	if h == nil {
+		if status.CWD != "" {
+			sb.WriteString(fmt.Sprintf("\nCWD: %s\nNo .harness/tasks.json found.", status.CWD))
+		}
+		b.send(chatID, sb.String())
+		return
+	}
+
+	sb.WriteString(fmt.Sprintf("\nProject: %s\n", h.ProjectName))
+	sb.WriteString(fmt.Sprintf("Phase: %s\n", h.CurrentPhase))
+	sb.WriteString(fmt.Sprintf("Progress: %d/%d done", h.Done, h.Total))
+	if h.InProgress > 0 {
+		sb.WriteString(fmt.Sprintf(", %d in progress", h.InProgress))
+	}
+	if h.Blocked > 0 {
+		sb.WriteString(fmt.Sprintf(", %d blocked", h.Blocked))
+	}
+	sb.WriteString("\n")
+
+	// Per-phase breakdown
+	phaseOrder := []string{"architecture", "uiux", "engineering", "qa"}
+	for _, phase := range phaseOrder {
+		ps, ok := h.Phases[phase]
+		if !ok {
+			continue
+		}
+		// Build progress bar
+		barLen := 10
+		filled := 0
+		if ps.Total > 0 {
+			filled = ps.Done * barLen / ps.Total
+		}
+		bar := strings.Repeat("█", filled) + strings.Repeat("░", barLen-filled)
+		sb.WriteString(fmt.Sprintf("\n  %s [%s] %d/%d", phase, bar, ps.Done, ps.Total))
+		if ps.InProgress > 0 {
+			sb.WriteString(fmt.Sprintf(" (%d running)", ps.InProgress))
+		}
+		if ps.Blocked > 0 {
+			sb.WriteString(fmt.Sprintf(" (%d blocked)", ps.Blocked))
+		}
+	}
+
+	if status.ChainDepth > 0 {
+		sb.WriteString(fmt.Sprintf("\n\nChain count: %d", status.ChainDepth))
+	}
+
+	b.send(chatID, sb.String())
 }
 
 // handleTextLocal is the original single-session behavior.

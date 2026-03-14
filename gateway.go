@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -138,6 +139,82 @@ func (g *GatewayClient) Send(chatID, message, userID, username string) (string, 
 	return result.Response, nil
 }
 
+// sseEvent represents a single server-sent event from the streaming endpoint.
+type sseEvent struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
+}
+
+// SendStream POSTs to the gateway streaming endpoint and reads the response as
+// an SSE stream. For each parsed event, onEvent is called with the event type
+// and content. Text events are accumulated and the full response is returned
+// when a "done" event is received.
+func (g *GatewayClient) SendStream(chatID, message, userID, username string, onEvent func(eventType, content string)) (string, error) {
+	body, err := json.Marshal(gatewaySendRequest{
+		ChatID:   chatID,
+		Message:  message,
+		BotID:    g.botID,
+		UserID:   userID,
+		Username: username,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	resp, err := doWithRetry(func() (*http.Response, error) {
+		return g.httpClient.Post(
+			g.baseURL+"/api/gateway/send-stream",
+			"application/json",
+			bytes.NewReader(body),
+		)
+	})
+	if err != nil {
+		return "", fmt.Errorf("stream request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("gateway HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var fullResponse strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+
+		var evt sseEvent
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			log.Printf("[gateway] failed to parse SSE event: %v (data: %s)", err, data)
+			continue
+		}
+
+		if onEvent != nil {
+			onEvent(evt.Type, evt.Content)
+		}
+
+		switch evt.Type {
+		case "text":
+			fullResponse.WriteString(evt.Content)
+		case "done":
+			return evt.Content, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("stream read error: %w", err)
+	}
+
+	// Stream ended without a "done" event — return what we accumulated.
+	if fullResponse.Len() > 0 {
+		return fullResponse.String(), fmt.Errorf("stream ended without done event")
+	}
+	return "", fmt.Errorf("stream ended without any events")
+}
+
 type gatewayBackgroundRequest struct {
 	ChatID   string `json:"chat_id"`
 	Message  string `json:"message"`
@@ -208,6 +285,54 @@ func (g *GatewayClient) GetBackgroundStatus(chatID string) (*gatewayBackgroundSt
 	}
 
 	var result gatewayBackgroundStatus
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// Harness status types
+type harnessPhaseStatus struct {
+	Total      int `json:"total"`
+	Done       int `json:"done"`
+	InProgress int `json:"in_progress"`
+	Blocked    int `json:"blocked"`
+	Pending    int `json:"pending"`
+}
+
+type harnessInfo struct {
+	ProjectName  string                        `json:"project_name"`
+	CurrentPhase string                        `json:"current_phase"`
+	Total        int                           `json:"total"`
+	Done         int                           `json:"done"`
+	InProgress   int                           `json:"in_progress"`
+	Blocked      int                           `json:"blocked"`
+	Pending      int                           `json:"pending"`
+	Phases       map[string]harnessPhaseStatus `json:"phases"`
+}
+
+type gatewayHarnessStatusResponse struct {
+	BgStatus       string       `json:"bg_status"`
+	ElapsedSeconds float64      `json:"elapsed_seconds"`
+	ChainDepth     int          `json:"chain_depth"`
+	CWD            string       `json:"cwd"`
+	Harness        *harnessInfo `json:"harness"`
+}
+
+func (g *GatewayClient) GetHarnessStatus(chatID string) (*gatewayHarnessStatusResponse, error) {
+	resp, err := g.httpClient.Get(g.baseURL + "/api/gateway/harness-status/" + chatID + "?bot_id=" + g.botID)
+	if err != nil {
+		return nil, fmt.Errorf("harness status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var result gatewayHarnessStatusResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
