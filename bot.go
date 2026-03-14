@@ -21,6 +21,7 @@ type Bot struct {
 	activeChatID int64          // only used in local mode
 	mu           sync.Mutex
 	gateway      *GatewayClient // nil in local mode
+	pendingExec  map[int64]string // chat_id -> exec prompt, awaiting user confirmation
 }
 
 func NewBot(token string, gatewayURL string, botID string) (*Bot, error) {
@@ -36,7 +37,8 @@ func NewBot(token string, gatewayURL string, botID string) (*Bot, error) {
 	}
 
 	b := &Bot{
-		api: api,
+		api:         api,
+		pendingExec: make(map[int64]string),
 	}
 	if gatewayURL != "" {
 		b.gateway = NewGatewayClient(gatewayURL, botID)
@@ -92,6 +94,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	case "purge":
 		b.handlePurge(chatID)
+		return
+	case "confirm":
+		b.handleConfirm(chatID)
 		return
 	}
 
@@ -153,6 +158,7 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "stop", Description: "停止会话 / Stop session"},
 		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
 		tgbotapi.BotCommand{Command: "purge", Description: "清理系统内存 / Purge system memory"},
+		tgbotapi.BotCommand{Command: "confirm", Description: "确认计划开始执行 / Confirm plan and start"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("Warning: failed to register bot commands: %v", err)
@@ -221,6 +227,24 @@ func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
 		}
 	}()
 	return stop
+}
+
+// handleConfirm starts background execution if a pending exec is waiting.
+func (b *Bot) handleConfirm(chatID int64) {
+	b.mu.Lock()
+	execPrompt, ok := b.pendingExec[chatID]
+	if ok {
+		delete(b.pendingExec, chatID)
+	}
+	b.mu.Unlock()
+
+	if !ok {
+		b.send(chatID, "No pending plan to confirm.")
+		return
+	}
+
+	b.send(chatID, "🚀 Confirmed. Starting background execution...")
+	b.startBackgroundExecution(chatID, execPrompt)
 }
 
 // startBackgroundExecution sends a message to the gateway's background endpoint.
@@ -322,9 +346,12 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 			b.sendLong(chatID, cleanResponse)
 		}
 
-		b.send(chatID, "🚀 Plan confirmed. Starting background execution...")
+		// Gate: store exec prompt and wait for user confirmation
 		execPrompt := "Resume the harness-loop. The plan has been confirmed. Enter the Execute Loop now. Execute all tasks following the harness-loop skill instructions."
-		b.startBackgroundExecution(chatID, execPrompt)
+		b.mu.Lock()
+		b.pendingExec[chatID] = execPrompt
+		b.mu.Unlock()
+		b.send(chatID, "📋 Plan ready. Reply /confirm to start background execution, or send feedback to revise.")
 		return
 	}
 
@@ -352,6 +379,37 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 // handleTextGateway forwards messages to the mini-claude-bot gateway.
 // No single-chat restriction — each chat_id gets its own isolated session.
 func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message) {
+	// Check if there's a pending exec awaiting confirmation
+	lower := strings.ToLower(strings.TrimSpace(text))
+	b.mu.Lock()
+	execPrompt, hasPending := b.pendingExec[chatID]
+	b.mu.Unlock()
+	if hasPending {
+		// Check for confirmation keywords
+		confirmWords := []string{"yes", "y", "ok", "confirm", "go", "go ahead", "approved", "start",
+			"确认", "可以", "开始", "好", "好的", "执行", "没问题"}
+		isConfirm := false
+		for _, w := range confirmWords {
+			if lower == w {
+				isConfirm = true
+				break
+			}
+		}
+		if isConfirm {
+			b.mu.Lock()
+			delete(b.pendingExec, chatID)
+			b.mu.Unlock()
+			b.send(chatID, "🚀 Confirmed. Starting background execution...")
+			b.startBackgroundExecution(chatID, execPrompt)
+			return
+		}
+		// Not a confirm — user is revising, clear pending and forward to Claude
+		b.mu.Lock()
+		delete(b.pendingExec, chatID)
+		b.mu.Unlock()
+		log.Printf("[bot] Pending exec cleared for chat=%d, forwarding revision to Claude", chatID)
+	}
+
 	// If this is a reply to another message, prepend the quoted context
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
 		text = fmt.Sprintf("[Replying to: \"%s\"]\n\n%s", msg.ReplyToMessage.Text, text)
