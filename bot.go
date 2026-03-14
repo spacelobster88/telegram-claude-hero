@@ -438,7 +438,7 @@ func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message
 func (b *Bot) handleHarnessStatus(chatID int64) {
 	chatIDStr := fmt.Sprintf("%d", chatID)
 
-	status, err := b.gateway.GetHarnessStatus(chatIDStr)
+	jobs, err := b.gateway.GetAllHarnessStatus(chatIDStr)
 	if err != nil {
 		// Fallback to basic background status
 		bgStatus, bgErr := b.gateway.GetBackgroundStatus(chatIDStr)
@@ -458,22 +458,42 @@ func (b *Bot) handleHarnessStatus(chatID int64) {
 		return
 	}
 
+	if len(jobs) == 0 {
+		b.send(chatID, "No background tasks running.")
+		return
+	}
+
 	var sb strings.Builder
-	h := status.Harness
+	for i, job := range jobs {
+		if i > 0 {
+			sb.WriteString("\n\n")
+		}
+		// Multi-job header (only if 2+ jobs)
+		if len(jobs) > 1 {
+			sb.WriteString(fmt.Sprintf("[%d/%d] ", i+1, len(jobs)))
+		}
+		b.formatJobStatus(&sb, &job)
+	}
+
+	b.send(chatID, sb.String())
+}
+
+// formatJobStatus writes a single job's status into the string builder.
+func (b *Bot) formatJobStatus(sb *strings.Builder, job *gatewayHarnessStatusResponse) {
+	h := job.Harness
 
 	// Header with background status
-	switch status.BgStatus {
+	switch job.BgStatus {
 	case "idle":
 		if h == nil {
-			b.send(chatID, "No background task running.")
+			sb.WriteString("Idle (no harness data)")
 			return
 		}
-		// Has harness data — skip the misleading "idle" header, show progress below
 	case "running":
-		elapsed := int(status.ElapsedSeconds)
+		elapsed := int(job.ElapsedSeconds)
 		sb.WriteString(fmt.Sprintf("Running (%dm%ds elapsed", elapsed/60, elapsed%60))
-		if status.ChainDepth > 0 {
-			sb.WriteString(fmt.Sprintf(", chain #%d", status.ChainDepth))
+		if job.ChainDepth > 0 {
+			sb.WriteString(fmt.Sprintf(", chain #%d", job.ChainDepth))
 		}
 		sb.WriteString(")\n")
 	case "completed":
@@ -482,12 +502,7 @@ func (b *Bot) handleHarnessStatus(chatID int64) {
 		sb.WriteString("Last batch failed.\n")
 	}
 
-	// Harness progress
 	if h == nil {
-		if status.CWD != "" {
-			sb.WriteString(fmt.Sprintf("CWD: %s\nNo .harness/tasks.json found.", status.CWD))
-		}
-		b.send(chatID, sb.String())
 		return
 	}
 
@@ -502,14 +517,12 @@ func (b *Bot) handleHarnessStatus(chatID int64) {
 	}
 	sb.WriteString("\n")
 
-	// Per-phase breakdown
 	phaseOrder := []string{"architecture", "uiux", "engineering", "qa"}
 	for _, phase := range phaseOrder {
 		ps, ok := h.Phases[phase]
 		if !ok {
 			continue
 		}
-		// Build progress bar
 		barLen := 10
 		filled := 0
 		if ps.Total > 0 {
@@ -525,11 +538,9 @@ func (b *Bot) handleHarnessStatus(chatID int64) {
 		}
 	}
 
-	if status.ChainDepth > 0 {
-		sb.WriteString(fmt.Sprintf("\n\nChain count: %d", status.ChainDepth))
+	if job.ChainDepth > 0 {
+		sb.WriteString(fmt.Sprintf("\n\nChain count: %d", job.ChainDepth))
 	}
-
-	b.send(chatID, sb.String())
 }
 
 // handleTextLocal is the original single-session behavior.

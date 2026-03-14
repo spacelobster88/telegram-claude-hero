@@ -216,10 +216,11 @@ func (g *GatewayClient) SendStream(chatID, message, userID, username string, onE
 }
 
 type gatewayBackgroundRequest struct {
-	ChatID   string `json:"chat_id"`
-	Message  string `json:"message"`
-	BotToken string `json:"bot_token"`
-	BotID    string `json:"bot_id,omitempty"`
+	ChatID    string `json:"chat_id"`
+	Message   string `json:"message"`
+	BotToken  string `json:"bot_token"`
+	BotID     string `json:"bot_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 type gatewayBackgroundResponse struct {
@@ -315,11 +316,16 @@ type gatewayHarnessStatusResponse struct {
 	BgStatus       string       `json:"bg_status"`
 	ElapsedSeconds float64      `json:"elapsed_seconds"`
 	ChainDepth     int          `json:"chain_depth"`
+	ProjectID      string       `json:"project_id"`
 	CWD            string       `json:"cwd"`
 	Harness        *harnessInfo `json:"harness"`
 }
 
-func (g *GatewayClient) GetHarnessStatus(chatID string) (*gatewayHarnessStatusResponse, error) {
+type gatewayHarnessStatusListResponse struct {
+	Jobs []gatewayHarnessStatusResponse `json:"jobs"`
+}
+
+func (g *GatewayClient) GetAllHarnessStatus(chatID string) ([]gatewayHarnessStatusResponse, error) {
 	resp, err := g.httpClient.Get(g.baseURL + "/api/gateway/harness-status/" + chatID + "?bot_id=" + g.botID)
 	if err != nil {
 		return nil, fmt.Errorf("harness status request failed: %w", err)
@@ -331,12 +337,24 @@ func (g *GatewayClient) GetHarnessStatus(chatID string) (*gatewayHarnessStatusRe
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	var result gatewayHarnessStatusResponse
+	var result gatewayHarnessStatusListResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
-	return &result, nil
+	return result.Jobs, nil
+}
+
+// GetHarnessStatus is kept for backward compatibility; returns first job or nil.
+func (g *GatewayClient) GetHarnessStatus(chatID string) (*gatewayHarnessStatusResponse, error) {
+	jobs, err := g.GetAllHarnessStatus(chatID)
+	if err != nil {
+		return nil, err
+	}
+	if len(jobs) == 0 {
+		return &gatewayHarnessStatusResponse{BgStatus: "idle"}, nil
+	}
+	return &jobs[0], nil
 }
 
 func (g *GatewayClient) Stop(chatID string) error {
