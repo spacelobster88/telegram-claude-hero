@@ -22,7 +22,7 @@ func NewSession() *Session {
 	return &Session{}
 }
 
-func (s *Session) Send(ctx context.Context, prompt string) (string, error) {
+func (s *Session) Send(ctx context.Context, prompt string, filePaths ...string) (string, error) {
 	s.mu.Lock()
 	if s.busy {
 		s.mu.Unlock()
@@ -46,6 +46,9 @@ func (s *Session) Send(ctx context.Context, prompt string) (string, error) {
 	args := []string{"-p", "--output-format", "text", "--dangerously-skip-permissions"}
 	if continued {
 		args = append(args, "--continue")
+	}
+	for _, fp := range filePaths {
+		args = append(args, "-f", fp)
 	}
 	args = append(args, prompt)
 
