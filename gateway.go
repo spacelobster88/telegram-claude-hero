@@ -357,6 +357,41 @@ func (g *GatewayClient) GetHarnessStatus(chatID string) (*gatewayHarnessStatusRe
 	return &jobs[0], nil
 }
 
+type gatewayCleanupResponse struct {
+	Cleaned  int      `json:"cleaned"`
+	Archived int      `json:"archived"`
+	Skipped  int      `json:"skipped"`
+	Details  []string `json:"details"`
+}
+
+func (g *GatewayClient) CleanupBackgroundTasks(chatID string) (*gatewayCleanupResponse, error) {
+	resp, err := g.httpClient.Post(
+		g.baseURL+"/api/gateway/cleanup/"+chatID+"?bot_id="+g.botID,
+		"application/json",
+		bytes.NewReader([]byte("{}")),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleanup request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("cleanup HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result gatewayCleanupResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
 func (g *GatewayClient) Stop(chatID string) error {
 	body, _ := json.Marshal(map[string]string{"chat_id": chatID, "bot_id": g.botID})
 	resp, err := g.httpClient.Post(

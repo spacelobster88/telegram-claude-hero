@@ -95,6 +95,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	case "purge":
 		b.handlePurge(chatID)
 		return
+	case "cleanup":
+		b.handleCleanup(chatID)
+		return
 	case "confirm":
 		b.handleConfirm(chatID)
 		return
@@ -158,6 +161,7 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "stop", Description: "停止会话 / Stop session"},
 		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
 		tgbotapi.BotCommand{Command: "purge", Description: "清理系统内存 / Purge system memory"},
+		tgbotapi.BotCommand{Command: "cleanup", Description: "清理过期任务 / Clean up stale background jobs"},
 		tgbotapi.BotCommand{Command: "confirm", Description: "确认计划开始执行 / Confirm plan and start"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
@@ -541,6 +545,37 @@ func (b *Bot) formatJobStatus(sb *strings.Builder, job *gatewayHarnessStatusResp
 	if job.ChainDepth > 0 {
 		sb.WriteString(fmt.Sprintf("\n\nChain count: %d", job.ChainDepth))
 	}
+}
+
+func (b *Bot) handleCleanup(chatID int64) {
+	if b.gateway == nil {
+		b.send(chatID, "Cleanup only available in gateway mode.")
+		return
+	}
+
+	chatIDStr := fmt.Sprintf("%d", chatID)
+	b.send(chatID, "Cleaning up stale background jobs...")
+
+	result, err := b.gateway.CleanupBackgroundTasks(chatIDStr)
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Error during cleanup: %v", err))
+		return
+	}
+
+	if result.Cleaned == 0 && result.Skipped == 0 {
+		b.send(chatID, "No background jobs found.")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Cleanup complete: %d cleaned, %d archived, %d skipped (still running)", result.Cleaned, result.Archived, result.Skipped))
+	if len(result.Details) > 0 {
+		sb.WriteString("\n")
+		for _, d := range result.Details {
+			sb.WriteString(fmt.Sprintf("\n• %s", d))
+		}
+	}
+	b.send(chatID, sb.String())
 }
 
 // handleTextLocal is the original single-session behavior.
