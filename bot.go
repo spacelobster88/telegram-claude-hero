@@ -83,20 +83,20 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 	// Bot-level commands (intercepted, never reach Claude)
 	switch msg.Command() {
-	case "stop":
-		b.handleStop(chatID, msg)
+	case "purge":
+		b.handlePurge(chatID)
 		return
 	case "start":
 		b.handleStart(chatID, msg)
 		return
-	case "status":
-		b.handleHarnessStatus(chatID)
-		return
-	case "purge":
-		b.handlePurge(chatID)
+	case "stop":
+		b.handleStop(chatID, msg)
 		return
 	case "cleanup":
 		b.handleCleanup(chatID)
+		return
+	case "status":
+		b.handleHarnessStatus(chatID)
 		return
 	case "confirm":
 		b.handleConfirm(chatID)
@@ -157,11 +157,11 @@ func (b *Bot) handleStop(chatID int64, msg *tgbotapi.Message) {
 
 func (b *Bot) registerCommands() {
 	commands := tgbotapi.NewSetMyCommands(
+		tgbotapi.BotCommand{Command: "purge", Description: "清理系统内存 / Purge system memory"},
 		tgbotapi.BotCommand{Command: "start", Description: "重置会话 / Reset session"},
 		tgbotapi.BotCommand{Command: "stop", Description: "停止会话 / Stop session"},
-		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
-		tgbotapi.BotCommand{Command: "purge", Description: "清理系统内存 / Purge system memory"},
 		tgbotapi.BotCommand{Command: "cleanup", Description: "清理过期任务 / Clean up stale background jobs"},
+		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
 		tgbotapi.BotCommand{Command: "confirm", Description: "确认计划开始执行 / Confirm plan and start"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
