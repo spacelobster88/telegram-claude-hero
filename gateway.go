@@ -396,6 +396,39 @@ func (g *GatewayClient) CleanupBackgroundTasks(chatID string) (*gatewayCleanupRe
 	return &result, nil
 }
 
+// chatMessage represents a single message from the chat session API.
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// GetRecentMessages fetches the last N messages for a chat session.
+func (g *GatewayClient) GetRecentMessages(chatID string, limit int) ([]chatMessage, error) {
+	sessionID := fmt.Sprintf("gw-%s-%s", g.botID, chatID)
+	url := fmt.Sprintf("%s/api/chat/sessions/%s?limit=%d", g.baseURL, sessionID, limit)
+
+	resp, err := g.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("get recent messages: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return nil, nil // no history yet
+	}
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("chat API HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var msgs []chatMessage
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		return nil, fmt.Errorf("decode messages: %w", err)
+	}
+	return msgs, nil
+}
+
 func (g *GatewayClient) Stop(chatID string) error {
 	body, _ := json.Marshal(map[string]string{"chat_id": chatID, "bot_id": g.botID})
 	resp, err := g.httpClient.Post(

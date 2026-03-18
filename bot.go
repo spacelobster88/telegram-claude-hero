@@ -233,6 +233,28 @@ func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
 	return stop
 }
 
+// buildExecWithContext prepends recent channel messages as context to the exec prompt.
+func (b *Bot) buildExecWithContext(chatID int64, execPrompt string) string {
+	chatIDStr := fmt.Sprintf("%d", chatID)
+	msgs, err := b.gateway.GetRecentMessages(chatIDStr, 3)
+	if err != nil {
+		log.Printf("[bot] Failed to fetch recent messages for context (chat=%d): %v", chatID, err)
+		return execPrompt
+	}
+	if len(msgs) == 0 {
+		return execPrompt
+	}
+
+	var ctx strings.Builder
+	ctx.WriteString("[Recent channel context]\n")
+	for _, m := range msgs {
+		ctx.WriteString(fmt.Sprintf("%s: %s\n", m.Role, m.Content))
+	}
+	ctx.WriteString("[End of context]\n\n")
+	ctx.WriteString(execPrompt)
+	return ctx.String()
+}
+
 // handleConfirm starts background execution if a pending exec is waiting.
 func (b *Bot) handleConfirm(chatID int64) {
 	b.mu.Lock()
@@ -248,7 +270,7 @@ func (b *Bot) handleConfirm(chatID int64) {
 	}
 
 	b.send(chatID, "🚀 Confirmed. Starting background execution...")
-	b.startBackgroundExecution(chatID, execPrompt)
+	b.startBackgroundExecution(chatID, b.buildExecWithContext(chatID, execPrompt))
 }
 
 // startBackgroundExecution sends a message to the gateway's background endpoint.
@@ -412,7 +434,7 @@ func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message
 			delete(b.pendingExec, chatID)
 			b.mu.Unlock()
 			b.send(chatID, "🚀 Confirmed. Starting background execution...")
-			b.startBackgroundExecution(chatID, execPrompt)
+			b.startBackgroundExecution(chatID, b.buildExecWithContext(chatID, execPrompt))
 			return
 		}
 		// Not a confirm — user is revising, clear pending and forward to Claude
