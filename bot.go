@@ -216,7 +216,7 @@ func (b *Bot) startTypingLoop(chatID int64) chan struct{} {
 	go func() {
 		ticker := time.NewTicker(4 * time.Second)
 		defer ticker.Stop()
-		timeout := time.NewTimer(10 * time.Minute)
+		timeout := time.NewTimer(30 * time.Minute)
 		defer timeout.Stop()
 		for {
 			select {
@@ -267,6 +267,7 @@ func (b *Bot) startBackgroundExecution(chatID int64, message string) {
 	}
 
 	log.Printf("[bot] Background execution started for chat=%d", chatID)
+	b.send(chatID, "✅ Harness loop started in background. Use /status to monitor progress.")
 }
 
 // sendStreamingToTelegram uses SendStream to display Claude's response with

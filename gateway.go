@@ -75,7 +75,9 @@ func NewGatewayClient(baseURL string, botID string) *GatewayClient {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Minute, // allow time for OOM retries (was 16min)
 			Transport: &http.Transport{
-				DisableKeepAlives: true, // prevent EOF on stale keep-alive connections
+				MaxIdleConns:        10,
+				MaxIdleConnsPerHost: 5,
+				IdleConnTimeout:     90 * time.Second,
 			},
 		},
 	}
@@ -210,7 +212,9 @@ func (g *GatewayClient) SendStream(chatID, message, userID, username string, onE
 
 	// Stream ended without a "done" event — return what we accumulated.
 	if fullResponse.Len() > 0 {
-		return fullResponse.String(), fmt.Errorf("stream ended without done event")
+		// Fix C2: Treat partial response as success — harness markers may still be present
+		log.Printf("[gateway] stream ended without done event, returning %d bytes of accumulated text", fullResponse.Len())
+		return fullResponse.String(), nil
 	}
 	return "", fmt.Errorf("stream ended without any events")
 }
