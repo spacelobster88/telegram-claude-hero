@@ -101,6 +101,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	case "confirm":
 		b.handleConfirm(chatID)
 		return
+	case "resume":
+		b.handleResume(chatID)
+		return
 	}
 
 	// Media message routing
@@ -163,6 +166,7 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "cleanup", Description: "清理过期任务 / Clean up stale background jobs"},
 		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
 		tgbotapi.BotCommand{Command: "confirm", Description: "确认计划开始执行 / Confirm plan and start"},
+		tgbotapi.BotCommand{Command: "resume", Description: "恢复后台任务 / Resume harness loop in background"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("Warning: failed to register bot commands: %v", err)
@@ -271,6 +275,30 @@ func (b *Bot) handleConfirm(chatID int64) {
 
 	b.send(chatID, "🚀 Confirmed. Starting background execution...")
 	b.startBackgroundExecution(chatID, b.buildExecWithContext(chatID, execPrompt))
+}
+
+// handleResume directly starts background execution for harness-loop resume.
+// Unlike regular "Resume" text messages that go through the foreground (where
+// HARNESS_BATCH_DONE markers are never parsed), /resume goes straight to
+// send_background() where the chain dispatch logic lives. See issue #7.
+func (b *Bot) handleResume(chatID int64) {
+	if b.gateway == nil {
+		b.send(chatID, "Gateway not configured.")
+		return
+	}
+
+	chatIDStr := fmt.Sprintf("%d", chatID)
+
+	// Check if a bg task is already running
+	bgStatus, err := b.gateway.GetBackgroundStatus(chatIDStr)
+	if err == nil && bgStatus.Status == "running" {
+		b.send(chatID, "Chain is already running. Use /status to check progress.")
+		return
+	}
+
+	resumePrompt := "Resume the harness-loop. Continue the Execute Loop — pick up the next batch of ready tasks."
+	b.send(chatID, "🔄 Resuming harness loop in background...")
+	b.startBackgroundExecution(chatID, b.buildExecWithContext(chatID, resumePrompt))
 }
 
 // startBackgroundExecution sends a message to the gateway's background endpoint.
