@@ -284,7 +284,11 @@ func (b *Bot) startBackgroundExecution(chatID int64, message string) {
 	}
 
 	if resp.Status == "rejected" {
-		b.send(chatID, fmt.Sprintf("Background task rejected: %s", resp.Reason))
+		if resp.Reason == "already running" {
+			b.send(chatID, "Chain is already running. Use /status to check progress.")
+		} else {
+			b.send(chatID, fmt.Sprintf("Background task rejected: %s", resp.Reason))
+		}
 		return
 	}
 
