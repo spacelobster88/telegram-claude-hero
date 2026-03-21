@@ -429,6 +429,81 @@ func (g *GatewayClient) GetRecentMessages(chatID string, limit int) ([]chatMessa
 	return msgs, nil
 }
 
+// NirmanaResponse is the response from the nirmana mode toggle endpoint.
+type NirmanaResponse struct {
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+	Briefing string `json:"briefing"`
+}
+
+// NirmanaStateResponse is the response from the nirmana state query endpoint.
+type NirmanaStateResponse struct {
+	NirmanaMode        bool     `json:"nirmana_mode"`
+	NirmanaActivatedAt float64  `json:"nirmana_activated_at"`
+	AwayDuration       *float64 `json:"away_duration_seconds"`
+}
+
+// SetNirmanaMode toggles nirmana mode (away/back) for a chat.
+func (g *GatewayClient) SetNirmanaMode(chatID string, action string) (*NirmanaResponse, error) {
+	body, err := json.Marshal(map[string]string{
+		"chat_id": chatID,
+		"bot_id":  g.botID,
+		"action":  action,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	resp, err := doWithRetry(func() (*http.Response, error) {
+		return g.httpClient.Post(
+			g.baseURL+"/api/gateway/nirmana",
+			"application/json",
+			bytes.NewReader(body),
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("nirmana request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("nirmana HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result NirmanaResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// GetNirmanaState returns current nirmana state for a chat.
+func (g *GatewayClient) GetNirmanaState(chatID string) (*NirmanaStateResponse, error) {
+	resp, err := g.httpClient.Get(g.baseURL + "/api/gateway/nirmana/" + chatID + "?bot_id=" + g.botID)
+	if err != nil {
+		return nil, fmt.Errorf("nirmana state request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var result NirmanaStateResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
 func (g *GatewayClient) Stop(chatID string) error {
 	body, _ := json.Marshal(map[string]string{"chat_id": chatID, "bot_id": g.botID})
 	resp, err := g.httpClient.Post(

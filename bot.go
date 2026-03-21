@@ -104,6 +104,12 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	case "resume":
 		b.handleResume(chatID)
 		return
+	case "away":
+		b.handleAway(chatID)
+		return
+	case "back":
+		b.handleBack(chatID)
+		return
 	}
 
 	// Media message routing
@@ -167,6 +173,8 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
 		tgbotapi.BotCommand{Command: "confirm", Description: "确认计划开始执行 / Confirm plan and start"},
 		tgbotapi.BotCommand{Command: "resume", Description: "恢复后台任务 / Resume harness loop in background"},
+		tgbotapi.BotCommand{Command: "away", Description: "离开模式 / Away - Nirmana takes over"},
+		tgbotapi.BotCommand{Command: "back", Description: "回来了 / Back - Eddie returns"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("Warning: failed to register bot commands: %v", err)
@@ -1015,4 +1023,40 @@ func splitMessage(text string) []string {
 		text = text[cutoff:]
 	}
 	return chunks
+}
+
+func (b *Bot) handleAway(chatID int64) {
+	if b.gateway == nil {
+		b.send(chatID, "Gateway not configured.")
+		return
+	}
+
+	chatIDStr := fmt.Sprintf("%d", chatID)
+	_, err := b.gateway.SetNirmanaMode(chatIDStr, "away")
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Error activating away mode: %v", err))
+		return
+	}
+
+	b.send(chatID, "接管了。I have the conn.")
+}
+
+func (b *Bot) handleBack(chatID int64) {
+	if b.gateway == nil {
+		b.send(chatID, "Gateway not configured.")
+		return
+	}
+
+	chatIDStr := fmt.Sprintf("%d", chatID)
+	result, err := b.gateway.SetNirmanaMode(chatIDStr, "back")
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Error deactivating away mode: %v", err))
+		return
+	}
+
+	if result.Briefing != "" {
+		b.sendLong(chatID, result.Briefing)
+	} else {
+		b.send(chatID, "Welcome back!")
+	}
 }
