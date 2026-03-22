@@ -442,7 +442,9 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 				b.api.Send(edit2)
 			}
 		} else {
-			// Response too long for single edit — delete thinking msg and send fresh
+			// Response too long for single edit — delete streaming msg and send fresh
+			del := tgbotapi.NewDeleteMessage(chatID, msgID)
+			b.api.Send(del)
 			b.sendLong(chatID, response)
 		}
 	} else {
