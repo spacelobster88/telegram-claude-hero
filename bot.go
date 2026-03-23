@@ -1163,7 +1163,7 @@ func (b *Bot) handleAway(chatID int64) {
 		}
 	}()
 
-	b.send(chatID, "接管了。I have the conn.")
+	b.send(chatID, "Nirmana has the conn now.")
 }
 
 func (b *Bot) handleBack(chatID int64) {
