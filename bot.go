@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -430,6 +431,23 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 		b.mu.Lock()
 		b.pendingExec[chatID] = execPrompt
 		b.mu.Unlock()
+
+		// If Nirmana mode is active (/away), auto-confirm as Eddie-Nirmana
+		if b.gateway != nil {
+			chatIDStr := strconv.FormatInt(chatID, 10)
+			state, err := b.gateway.GetNirmanaState(chatIDStr)
+			if err == nil && state != nil && state.NirmanaMode {
+				log.Printf("[nirmana] Auto-confirming harness-loop for chat %d (Eddie is /away)", chatID)
+				b.send(chatID, "🤖 Nirmana auto-confirming plan (Eddie is /away)...")
+				go func() {
+					// Small delay to let the pending exec settle
+					time.Sleep(2 * time.Second)
+					b.handleConfirm(chatID)
+				}()
+				return
+			}
+		}
+
 		b.send(chatID, "📋 Plan ready. Reply /confirm to start background execution, or send feedback to revise.")
 		return
 	}
