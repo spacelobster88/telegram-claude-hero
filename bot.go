@@ -671,7 +671,7 @@ func (b *Bot) handleMetaStatus(chatID int64) {
 	// Last cycle
 	if status.LastCycle != nil {
 		sb.WriteString(fmt.Sprintf("\n📊 Last Cycle #%d: `%s`\n", status.LastCycle.CycleNum, status.LastCycle.Status))
-		sb.WriteString(fmt.Sprintf("   Trigger: %s | Steps: %d/6\n", status.LastCycle.Trigger, status.LastCycle.StepsCompleted))
+		sb.WriteString(fmt.Sprintf("   Trigger: %s | Steps: %d/7\n", status.LastCycle.Trigger, status.LastCycle.StepsCompleted))
 		if status.LastCycle.IdentityVerdict != "" {
 			sb.WriteString(fmt.Sprintf("   Identity: %s\n", status.LastCycle.IdentityVerdict))
 		}
