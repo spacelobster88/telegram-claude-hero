@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	case "back":
 		b.handleBack(chatID)
 		return
+	case "metastatus":
+		b.handleMetaStatus(chatID)
+		return
 	}
 
 	// Media message routing
@@ -175,6 +179,7 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "resume", Description: "恢复后台任务 / Resume harness loop in background"},
 		tgbotapi.BotCommand{Command: "away", Description: "离开模式 / Away - Nirmana takes over"},
 		tgbotapi.BotCommand{Command: "back", Description: "回来了 / Back - Eddie returns"},
+		tgbotapi.BotCommand{Command: "metastatus", Description: "元循环状态 / AROS Meta Loop status"},
 	)
 	if _, err := b.api.Request(commands); err != nil {
 		log.Printf("Warning: failed to register bot commands: %v", err)
@@ -612,6 +617,98 @@ func (b *Bot) formatJobStatus(sb *strings.Builder, job *gatewayHarnessStatusResp
 	}
 }
 
+func (b *Bot) handleMetaStatus(chatID int64) {
+	if b.gateway == nil {
+		b.send(chatID, "Meta-loop status only available in gateway mode.")
+		return
+	}
+
+	status, err := b.gateway.GetMetaLoopStatus()
+	if err != nil {
+		b.send(chatID, "⚠️ Meta-loop service unavailable: "+err.Error())
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🧠 **AROS Meta Loop Status**\n\n")
+
+	// Mode and state
+	modeEmoji := "⚖️"
+	switch status.CadenceMode {
+	case "aggressive":
+		modeEmoji = "🔥"
+	case "conservative":
+		modeEmoji = "🐢"
+	case "frozen":
+		modeEmoji = "❄️"
+	}
+
+	runningText := "idle"
+	if status.Running {
+		runningText = "🔄 running"
+	}
+
+	sb.WriteString(fmt.Sprintf("%s Mode: `%s` | State: %s\n", modeEmoji, status.CadenceMode, runningText))
+
+	// Last cycle
+	if status.LastCycle != nil {
+		sb.WriteString(fmt.Sprintf("\n📊 Last Cycle #%d: `%s`\n", status.LastCycle.CycleNum, status.LastCycle.Status))
+		sb.WriteString(fmt.Sprintf("   Trigger: %s | Steps: %d/6\n", status.LastCycle.Trigger, status.LastCycle.StepsCompleted))
+		if status.LastCycle.IdentityVerdict != "" {
+			sb.WriteString(fmt.Sprintf("   Identity: %s\n", status.LastCycle.IdentityVerdict))
+		}
+	}
+
+	// Meta-goal scores with progress bars
+	if status.MetaGoalScores != nil {
+		sb.WriteString("\n📈 **Meta-Goals:**\n")
+		goals := []struct{ key, label string }{
+			{"G1_truthful", "G1 Truthful"},
+			{"G2_efficient", "G2 Efficient"},
+			{"G3_reliable", "G3 Reliable"},
+			{"G4_aligned", "G4 Aligned"},
+			{"G5_ambitious", "G5 Ambitious"},
+			{"G6_self_know", "G6 Self-Know"},
+		}
+		for _, g := range goals {
+			if val, ok := status.MetaGoalScores[g.key]; ok {
+				score := 0.0
+				switch v := val.(type) {
+				case float64:
+					score = v
+				case int:
+					score = float64(v)
+				}
+				bar := metaProgressBar(score, 10)
+				sb.WriteString(fmt.Sprintf("   %s %s `%.0f%%`\n", g.label, bar, score*100))
+			}
+		}
+		if agg, ok := status.MetaGoalScores["aggregate"]; ok {
+			if v, ok := agg.(float64); ok {
+				sb.WriteString(fmt.Sprintf("\n   **Aggregate: %.0f%%**\n", v*100))
+			}
+		}
+	}
+
+	// Pending approvals
+	if status.PendingApprovals > 0 {
+		sb.WriteString(fmt.Sprintf("\n⏳ %d pending approval(s)\n", status.PendingApprovals))
+	}
+
+	b.send(chatID, sb.String())
+}
+
+func metaProgressBar(value float64, width int) string {
+	filled := int(value * float64(width))
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
+}
+
 func (b *Bot) handleCleanup(chatID int64) {
 	if b.gateway == nil {
 		b.send(chatID, "Cleanup only available in gateway mode.")
@@ -1040,6 +1137,14 @@ func (b *Bot) handleAway(chatID int64) {
 		return
 	}
 
+	// Notify meta-loop of Nirmana activation
+	go func() {
+		resp, err := http.Post("http://localhost:8200/api/meta-loop/nirmana?activate=true", "application/json", nil)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
 	b.send(chatID, "接管了。I have the conn.")
 }
 
@@ -1055,6 +1160,14 @@ func (b *Bot) handleBack(chatID int64) {
 		b.send(chatID, fmt.Sprintf("Error deactivating away mode: %v", err))
 		return
 	}
+
+	// Notify meta-loop of Nirmana deactivation
+	go func() {
+		resp, err := http.Post("http://localhost:8200/api/meta-loop/nirmana?activate=false", "application/json", nil)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
 
 	if result.Briefing != "" {
 		b.sendLong(chatID, result.Briefing)

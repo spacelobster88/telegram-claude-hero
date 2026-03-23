@@ -504,6 +504,42 @@ func (g *GatewayClient) GetNirmanaState(chatID string) (*NirmanaStateResponse, e
 	return &result, nil
 }
 
+// MetaLoopStatus represents the meta-loop status response.
+type MetaLoopStatus struct {
+	Running          bool                   `json:"running"`
+	BotID            string                 `json:"bot_id"`
+	CadenceMode      string                 `json:"cadence_mode"`
+	PendingApprovals int                    `json:"pending_approvals"`
+	LastCycle         *MetaLoopCycleInfo     `json:"last_cycle"`
+	MetaGoalScores   map[string]interface{} `json:"meta_goal_scores"`
+}
+
+// MetaLoopCycleInfo contains details about a single meta-loop cycle.
+type MetaLoopCycleInfo struct {
+	CycleNum        int    `json:"cycle_num"`
+	Trigger         string `json:"trigger"`
+	StartedAt       string `json:"started_at"`
+	FinishedAt      string `json:"finished_at"`
+	StepsCompleted  int    `json:"steps_completed"`
+	Status          string `json:"status"`
+	IdentityVerdict string `json:"identity_verdict"`
+}
+
+// GetMetaLoopStatus calls the meta-loop status endpoint.
+func (g *GatewayClient) GetMetaLoopStatus() (*MetaLoopStatus, error) {
+	resp, err := g.httpClient.Get("http://localhost:8200/api/meta-loop/status")
+	if err != nil {
+		return nil, fmt.Errorf("meta-loop service unavailable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var status MetaLoopStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("failed to decode meta-loop status: %w", err)
+	}
+	return &status, nil
+}
+
 func (g *GatewayClient) Stop(chatID string) error {
 	body, _ := json.Marshal(map[string]string{"chat_id": chatID, "bot_id": g.botID})
 	resp, err := g.httpClient.Post(
