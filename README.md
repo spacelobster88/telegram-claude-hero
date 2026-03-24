@@ -183,4 +183,4 @@ See [`.claude/skills/deploy.md`](.claude/skills/deploy.md) for full details.
 
 ## License
 
-MIT
+Apache-2.0
