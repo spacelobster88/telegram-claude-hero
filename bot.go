@@ -598,16 +598,26 @@ func (b *Bot) formatJobStatus(sb *strings.Builder, job *gatewayHarnessStatusResp
 		return
 	}
 
-	sb.WriteString(fmt.Sprintf("Project: %s\n", h.ProjectName))
+	if h.ProjectName != "" {
+		sb.WriteString(fmt.Sprintf("Project: %s\n", h.ProjectName))
+	}
 	sb.WriteString(fmt.Sprintf("Phase: %s\n", h.CurrentPhase))
-	sb.WriteString(fmt.Sprintf("Progress: %d/%d done", h.Done, h.Total))
-	if h.InProgress > 0 {
-		sb.WriteString(fmt.Sprintf(", %d in progress", h.InProgress))
+	if h.Total == 0 {
+		if job.BgStatus == "running" {
+			sb.WriteString("Progress: generating task DAG...\n")
+		} else {
+			sb.WriteString("Progress: no tasks defined yet\n")
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("Progress: %d/%d done", h.Done, h.Total))
+		if h.InProgress > 0 {
+			sb.WriteString(fmt.Sprintf(", %d in progress", h.InProgress))
+		}
+		if h.Blocked > 0 {
+			sb.WriteString(fmt.Sprintf(", %d blocked", h.Blocked))
+		}
+		sb.WriteString("\n")
 	}
-	if h.Blocked > 0 {
-		sb.WriteString(fmt.Sprintf(", %d blocked", h.Blocked))
-	}
-	sb.WriteString("\n")
 
 	phaseOrder := []string{"architecture", "uiux", "engineering", "qa"}
 	for _, phase := range phaseOrder {
