@@ -1131,7 +1131,7 @@ func convertMarkdownTables(text string) (string, map[string]string) {
 				}
 			}
 
-			// Build aligned table with clean spacing (no pipes)
+			// Build aligned table with pipe separators and header underline
 			var tableBuilder strings.Builder
 			tableBuilder.WriteString("<pre>")
 			for ri, row := range dataRows {
@@ -1140,7 +1140,7 @@ func convertMarkdownTables(text string) (string, map[string]string) {
 				}
 				for ci := 0; ci < maxCols; ci++ {
 					if ci > 0 {
-						tableBuilder.WriteString("  ")
+						tableBuilder.WriteString(" │ ")
 					}
 					cell := ""
 					if ci < len(row) {
@@ -1159,15 +1159,13 @@ func convertMarkdownTables(text string) (string, map[string]string) {
 				// Add header underline after first row
 				if ri == 0 {
 					tableBuilder.WriteString("\n")
-					totalWidth := 0
 					for ci, w := range colWidths {
-						totalWidth += w
 						if ci > 0 {
-							totalWidth += 2 // account for "  " gap
+							tableBuilder.WriteString("─┼─")
 						}
-					}
-					for j := 0; j < totalWidth; j++ {
-						tableBuilder.WriteString("─")
+						for j := 0; j < w; j++ {
+							tableBuilder.WriteString("─")
+						}
 					}
 				}
 			}
