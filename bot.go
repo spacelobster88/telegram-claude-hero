@@ -1030,8 +1030,153 @@ func (b *Bot) send(chatID int64, text string) {
 	}
 }
 
+// convertMarkdownTables detects markdown pipe-delimited tables and converts
+// them to <pre> blocks with aligned columns. It returns the modified text and
+// a slice of rendered <pre> blocks keyed by placeholder strings.
+func convertMarkdownTables(text string) (string, map[string]string) {
+	lines := strings.Split(text, "\n")
+	placeholders := make(map[string]string)
+	placeholderIdx := 0
+
+	var result []string
+	i := 0
+	inCodeBlock := false
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			result = append(result, lines[i])
+			i++
+			continue
+		}
+		if !inCodeBlock && strings.HasPrefix(trimmed, "|") {
+			// Collect consecutive lines starting with |
+			tableStart := i
+			for i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "|") {
+				i++
+			}
+			tableLines := lines[tableStart:i]
+
+			// Parse table: split each line into cells, identify separator rows
+			var dataRows [][]string
+			for _, tl := range tableLines {
+				tl = strings.TrimSpace(tl)
+				// Remove leading/trailing pipes
+				tl = strings.Trim(tl, "|")
+				cells := strings.Split(tl, "|")
+				// Check if this is a separator row (all cells match ---+ pattern)
+				isSep := true
+				for _, c := range cells {
+					c = strings.TrimSpace(c)
+					if c == "" {
+						continue
+					}
+					allDash := true
+					for _, ch := range c {
+						if ch != '-' && ch != ':' {
+							allDash = false
+							break
+						}
+					}
+					if !allDash || len(strings.TrimSpace(c)) == 0 {
+						isSep = false
+						break
+					}
+				}
+				if isSep && len(cells) > 0 {
+					// Check that at least one cell has dashes
+					hasDash := false
+					for _, c := range cells {
+						if strings.ContainsRune(strings.TrimSpace(c), '-') {
+							hasDash = true
+							break
+						}
+					}
+					if hasDash {
+						continue // skip separator row
+					}
+				}
+				// Trim each cell
+				trimmedCells := make([]string, len(cells))
+				for ci, c := range cells {
+					trimmedCells[ci] = strings.TrimSpace(c)
+				}
+				dataRows = append(dataRows, trimmedCells)
+			}
+
+			if len(dataRows) == 0 {
+				// No data rows, just pass through
+				result = append(result, tableLines...)
+				continue
+			}
+
+			// Compute max column widths
+			maxCols := 0
+			for _, row := range dataRows {
+				if len(row) > maxCols {
+					maxCols = len(row)
+				}
+			}
+			colWidths := make([]int, maxCols)
+			for _, row := range dataRows {
+				for ci := 0; ci < len(row) && ci < maxCols; ci++ {
+					// HTML-escape and measure
+					escaped := row[ci]
+					escaped = strings.ReplaceAll(escaped, "&", "&amp;")
+					escaped = strings.ReplaceAll(escaped, "<", "&lt;")
+					escaped = strings.ReplaceAll(escaped, ">", "&gt;")
+					if len(escaped) > colWidths[ci] {
+						colWidths[ci] = len(escaped)
+					}
+				}
+			}
+
+			// Build aligned table
+			var tableBuilder strings.Builder
+			tableBuilder.WriteString("<pre>")
+			for ri, row := range dataRows {
+				if ri > 0 {
+					tableBuilder.WriteString("\n")
+				}
+				for ci := 0; ci < maxCols; ci++ {
+					if ci > 0 {
+						tableBuilder.WriteString(" | ")
+					}
+					cell := ""
+					if ci < len(row) {
+						cell = row[ci]
+					}
+					// HTML-escape
+					cell = strings.ReplaceAll(cell, "&", "&amp;")
+					cell = strings.ReplaceAll(cell, "<", "&lt;")
+					cell = strings.ReplaceAll(cell, ">", "&gt;")
+					// Pad to column width
+					for len(cell) < colWidths[ci] {
+						cell += " "
+					}
+					tableBuilder.WriteString(cell)
+				}
+			}
+			tableBuilder.WriteString("</pre>")
+
+			placeholder := fmt.Sprintf("__TABLE_PLACEHOLDER_%d__", placeholderIdx)
+			placeholderIdx++
+			placeholders[placeholder] = tableBuilder.String()
+			result = append(result, placeholder)
+		} else {
+			result = append(result, lines[i])
+			i++
+		}
+	}
+
+	return strings.Join(result, "\n"), placeholders
+}
+
 // markdownToTelegramHTML converts Claude's markdown output to Telegram-compatible HTML.
 func markdownToTelegramHTML(text string) string {
+	// Convert markdown tables to <pre> blocks first, before any other processing
+	text, tablePlaceholders := convertMarkdownTables(text)
+
 	// Escape HTML entities first
 	text = strings.ReplaceAll(text, "&", "&amp;")
 	text = strings.ReplaceAll(text, "<", "&lt;")
@@ -1118,6 +1263,14 @@ func markdownToTelegramHTML(text string) string {
 		}
 		inner := text[start+2 : start+2+end]
 		text = text[:start] + "<s>" + inner + "</s>" + text[start+2+end+2:]
+	}
+
+	// Replace table placeholders with rendered <pre> blocks
+	for placeholder, preBlock := range tablePlaceholders {
+		// The placeholder has been HTML-escaped by the escaping step above,
+		// but since it only contains alphanumeric, underscores, and digits,
+		// the escaping won't change it. Replace it with the pre-rendered block.
+		text = strings.ReplaceAll(text, placeholder, preBlock)
 	}
 
 	return text
