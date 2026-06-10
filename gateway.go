@@ -496,6 +496,10 @@ func (g *GatewayClient) GetNirmanaState(chatID string) (*NirmanaStateResponse, e
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("nirmana state HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
 	var result NirmanaStateResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
