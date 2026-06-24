@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -46,12 +47,72 @@ func stripExecReadyMarker(response string) string {
 }
 
 type Bot struct {
-	api          *tgbotapi.BotAPI
-	session      *Session       // only used in local mode
-	activeChatID int64          // only used in local mode
-	mu           sync.Mutex
-	gateway      *GatewayClient // nil in local mode
-	pendingExec  map[int64]string // chat_id -> exec prompt, awaiting user confirmation
+	api             *tgbotapi.BotAPI
+	session         *Session // only used in local mode
+	activeChatID    int64    // only used in local mode
+	mu              sync.Mutex
+	gateway         *GatewayClient   // nil in local mode
+	pendingExec     map[int64]string // chat_id -> exec prompt, awaiting user confirmation
+	pendingExecPath string           // disk path persisting pendingExec across bot restarts
+}
+
+// defaultPendingExecPath returns where the pending-exec map is persisted so that a
+// confirmed-but-not-yet-/confirm'd plan survives a bot restart (otherwise the user
+// hits "No pending plan to confirm." after a redeploy). Override via env for tests.
+func defaultPendingExecPath() string {
+	if p := os.Getenv("HARNESS_PENDING_EXEC_PATH"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "pending_exec.json"
+	}
+	return filepath.Join(home, ".telegram-claude-hero", "pending_exec.json")
+}
+
+// loadPendingExec restores the pending-exec map from disk. Missing/corrupt files are
+// non-fatal — we simply start with an empty map.
+func (b *Bot) loadPendingExec() {
+	if b.pendingExecPath == "" {
+		return
+	}
+	data, err := os.ReadFile(b.pendingExecPath)
+	if err != nil {
+		return // no store yet — fine on first run
+	}
+	m := make(map[int64]string)
+	if err := json.Unmarshal(data, &m); err != nil {
+		log.Printf("[bot] ignoring corrupt pending-exec store %s: %v", b.pendingExecPath, err)
+		return
+	}
+	b.pendingExec = m
+	if len(m) > 0 {
+		log.Printf("[bot] restored %d pending plan(s) from %s", len(m), b.pendingExecPath)
+	}
+}
+
+// savePendingExecLocked writes the pending-exec map to disk atomically. The caller
+// MUST hold b.mu. Persistence failures are logged but never block the chat flow.
+func (b *Bot) savePendingExecLocked() {
+	if b.pendingExecPath == "" {
+		return
+	}
+	if dir := filepath.Dir(b.pendingExecPath); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	data, err := json.Marshal(b.pendingExec)
+	if err != nil {
+		log.Printf("[bot] failed to marshal pending-exec store: %v", err)
+		return
+	}
+	tmp := b.pendingExecPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		log.Printf("[bot] failed to write pending-exec store: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, b.pendingExecPath); err != nil {
+		log.Printf("[bot] failed to commit pending-exec store: %v", err)
+	}
 }
 
 func NewBot(token string, gatewayURL string, botID string) (*Bot, error) {
@@ -67,9 +128,11 @@ func NewBot(token string, gatewayURL string, botID string) (*Bot, error) {
 	}
 
 	b := &Bot{
-		api:         api,
-		pendingExec: make(map[int64]string),
+		api:             api,
+		pendingExec:     make(map[int64]string),
+		pendingExecPath: defaultPendingExecPath(),
 	}
+	b.loadPendingExec()
 	if gatewayURL != "" {
 		b.gateway = NewGatewayClient(gatewayURL, botID)
 		log.Printf("Gateway mode: %s (bot_id=%s)", gatewayURL, botID)
@@ -307,6 +370,7 @@ func (b *Bot) handleConfirm(chatID int64) {
 	execPrompt, ok := b.pendingExec[chatID]
 	if ok {
 		delete(b.pendingExec, chatID)
+		b.savePendingExecLocked()
 	}
 	b.mu.Unlock()
 
@@ -457,6 +521,7 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 		execPrompt := "Resume the harness-loop. The plan has been confirmed. Enter the Execute Loop now. Execute all tasks following the harness-loop skill instructions."
 		b.mu.Lock()
 		b.pendingExec[chatID] = execPrompt
+		b.savePendingExecLocked()
 		b.mu.Unlock()
 
 		// If Nirmana mode is active (/away), auto-confirm as Eddie-Nirmana
@@ -524,6 +589,7 @@ func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message
 		if isConfirm {
 			b.mu.Lock()
 			delete(b.pendingExec, chatID)
+			b.savePendingExecLocked()
 			b.mu.Unlock()
 			b.send(chatID, "🚀 Confirmed. Starting background execution...")
 			b.startBackgroundExecution(chatID, b.buildExecWithContext(chatID, execPrompt))
@@ -532,6 +598,7 @@ func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message
 		// Not a confirm — user is revising, clear pending and forward to Claude
 		b.mu.Lock()
 		delete(b.pendingExec, chatID)
+		b.savePendingExecLocked()
 		b.mu.Unlock()
 		log.Printf("[bot] Pending exec cleared for chat=%d, forwarding revision to Claude", chatID)
 	}
