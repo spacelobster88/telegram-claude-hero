@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,33 @@ import (
 )
 
 const maxMessageLen = 4096
+
+// execReadyMarkerRe tolerates whitespace inside the [HARNESS_EXEC_READY] marker
+// (e.g. "[ HARNESS_EXEC_READY ]") and, combined with backslash stripping,
+// markdown/escaped variants like **[HARNESS_EXEC_READY]** or \[HARNESS\_EXEC\_READY\].
+// A finished plan must never silently fail to trigger execution. See issue #12.
+var execReadyMarkerRe = regexp.MustCompile(`(?i)\[\s*HARNESS\s*_\s*EXEC\s*_\s*READY\s*\]`)
+
+// containsExecReadyMarker reports whether the response carries the harness
+// exec-ready marker, tolerant of surrounding markdown and backslash escapes.
+func containsExecReadyMarker(response string) bool {
+	if execReadyMarkerRe.MatchString(response) {
+		return true
+	}
+	// Fallback: model escaped the brackets/underscores (\[HARNESS\_EXEC\_READY\]).
+	return execReadyMarkerRe.MatchString(strings.ReplaceAll(response, `\`, ""))
+}
+
+// stripExecReadyMarker removes the exec-ready marker for display, preserving the
+// rest of the text. Only falls back to aggressive backslash stripping if an
+// escaped marker survives the plain pass.
+func stripExecReadyMarker(response string) string {
+	out := execReadyMarkerRe.ReplaceAllString(response, "")
+	if containsExecReadyMarker(out) {
+		out = execReadyMarkerRe.ReplaceAllString(strings.ReplaceAll(out, `\`, ""), "")
+	}
+	return out
+}
 
 type Bot struct {
 	api          *tgbotapi.BotAPI
@@ -409,10 +437,9 @@ func (b *Bot) sendStreamingToTelegram(chatID int64, chatIDStr, text, userID, use
 		return
 	}
 
-	// Check for HARNESS_EXEC_READY marker
-	const execReadyMarker = "[HARNESS_EXEC_READY]"
-	if strings.Contains(response, execReadyMarker) {
-		cleanResponse := strings.ReplaceAll(response, execReadyMarker, "")
+	// Check for HARNESS_EXEC_READY marker (tolerant of markdown/whitespace/escapes)
+	if containsExecReadyMarker(response) {
+		cleanResponse := stripExecReadyMarker(response)
 		cleanResponse = strings.TrimSpace(cleanResponse)
 		if msgID != 0 {
 			if len(cleanResponse) <= 4096 {
