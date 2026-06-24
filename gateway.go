@@ -204,6 +204,13 @@ func (g *GatewayClient) SendStream(chatID, message, userID, username string, onE
 			fullResponse.WriteString(evt.Content)
 		case "done":
 			return evt.Content, nil
+		case "error":
+			// Server-side error (e.g. "[BUSY]..."). Surface the message instead of
+			// swallowing it and reporting the misleading "stream ended without any events".
+			if evt.Content != "" {
+				return fullResponse.String(), fmt.Errorf("%s", evt.Content)
+			}
+			return fullResponse.String(), fmt.Errorf("server error event with no content")
 		}
 	}
 	if err := scanner.Err(); err != nil {
