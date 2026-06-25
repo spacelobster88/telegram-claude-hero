@@ -63,7 +63,7 @@ func defaultPendingExecPath() string {
 	if p := os.Getenv("HARNESS_PENDING_EXEC_PATH"); p != "" {
 		return p
 	}
-	home, err := os.UserHomeDir()
+	home, err := resolveHomeDir()
 	if err != nil || home == "" {
 		return "pending_exec.json"
 	}

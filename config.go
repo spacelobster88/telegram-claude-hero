@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -16,10 +17,25 @@ type Config struct {
 	OpenAIAPIKey     string `json:"openai_api_key,omitempty"`
 }
 
+// resolveHomeDir returns the user's home directory. It prefers os.UserHomeDir()
+// (which reads $HOME) but falls back to the OS user database via user.Current()
+// when $HOME is unset. launchd does not always seed $HOME into a job's environment,
+// and without this fallback config loading fails with EX_CONFIG and the service
+// crash-loops at boot until $HOME is manually added to the plist.
+func resolveHomeDir() (string, error) {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home, nil
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir, nil
+	}
+	return "", fmt.Errorf("getting home directory: $HOME unset and user lookup failed")
+}
+
 func ConfigPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := resolveHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("getting home directory: %w", err)
+		return "", err
 	}
 	return filepath.Join(home, ".telegram-claude-hero.json"), nil
 }
