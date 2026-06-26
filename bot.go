@@ -1521,9 +1521,28 @@ func (b *Bot) handleBack(chatID int64) {
 		}
 	}()
 
+	var sb strings.Builder
 	if result.Briefing != "" {
-		b.sendLong(chatID, result.Briefing)
+		sb.WriteString(result.Briefing)
 	} else {
-		b.send(chatID, "Welcome back!")
+		sb.WriteString("Welcome back!")
 	}
+
+	// Halt new /away pickups and report the per-issue roundup.
+	if stop, err := b.gateway.AwayStop(chatIDStr); err != nil {
+		sb.WriteString("\n\n⚠️ Could not fetch away roundup: " + err.Error())
+	} else if len(stop.Roundup) > 0 {
+		sb.WriteString("\n\n📋 Away roundup (new pickups stopped):\n")
+		for _, r := range stop.Roundup {
+			icon, detail := "✅", r.PRURL
+			if r.Status != "done" {
+				icon = "❌"
+				if detail = r.Err; detail == "" {
+					detail = r.Status
+				}
+			}
+			sb.WriteString(fmt.Sprintf("  %s %s#%d — %s\n", icon, r.Repo, r.Number, detail))
+		}
+	}
+	b.sendLong(chatID, sb.String())
 }

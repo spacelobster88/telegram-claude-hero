@@ -383,6 +383,48 @@ func (g *GatewayClient) AwayStart(chatID, botToken string) (*awayStartResponse, 
 	return &result, nil
 }
 
+type awayResult struct {
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Branch string `json:"branch"`
+	Status string `json:"status"`
+	PRURL  string `json:"pr_url"`
+	Err    string `json:"error,omitempty"`
+}
+
+type awayStopResponse struct {
+	Roundup           []awayResult `json:"roundup"`
+	StoppedNewPickups bool         `json:"stopped_new_pickups"`
+}
+
+// AwayStop halts new /away pickups and returns the per-issue roundup (for /back).
+func (g *GatewayClient) AwayStop(chatID string) (*awayStopResponse, error) {
+	body, err := json.Marshal(map[string]string{"chat_id": chatID, "bot_id": g.botID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := g.httpClient.Post(g.baseURL+"/api/gateway/away/stop", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("away/stop request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("away/stop HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result awayStopResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return &result, nil
+}
+
 // Harness status types
 type harnessPhaseStatus struct {
 	Total      int `json:"total"`
