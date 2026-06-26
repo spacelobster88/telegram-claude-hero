@@ -334,6 +334,55 @@ func (g *GatewayClient) GetQueueStatus(chatID string) (*gatewayQueueStatus, erro
 	return &result, nil
 }
 
+// Away issue-automation types (POST /api/gateway/away/start, /away/stop).
+type awayStartRequest struct {
+	ChatID   string `json:"chat_id"`
+	BotID    string `json:"bot_id,omitempty"`
+	BotToken string `json:"bot_token"`
+}
+
+type awayIssue struct {
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Branch string `json:"branch"`
+}
+
+type awayStartResponse struct {
+	Repos  []string    `json:"repos"`
+	Queued int         `json:"queued"`
+	Issues []awayIssue `json:"issues"`
+	Capped bool        `json:"capped"`
+}
+
+// AwayStart kicks off /away issue automation: the backend resolves eligible issues
+// across the configured repos and spawns forced-auto worktree loops (draft PRs).
+func (g *GatewayClient) AwayStart(chatID, botToken string) (*awayStartResponse, error) {
+	body, err := json.Marshal(awayStartRequest{ChatID: chatID, BotID: g.botID, BotToken: botToken})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := g.httpClient.Post(g.baseURL+"/api/gateway/away/start", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("away/start request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("away/start HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result awayStartResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return &result, nil
+}
+
 // Harness status types
 type harnessPhaseStatus struct {
 	Total      int `json:"total"`

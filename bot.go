@@ -1466,7 +1466,38 @@ func (b *Bot) handleAway(chatID int64) {
 		}
 	}()
 
-	b.send(chatID, "Nirmana has the conn now.")
+	// Kick off /away issue automation (forced auto-mode, draft PRs) and report
+	// the configured repo list + queued issues. Eddie is away — this self-drives.
+	var sb strings.Builder
+	sb.WriteString("Nirmana has the conn now.\n\n")
+	resp, err := b.gateway.AwayStart(chatIDStr, b.api.Token)
+	if err != nil {
+		sb.WriteString("⚠️ Away automation failed to start: " + err.Error())
+		b.send(chatID, sb.String())
+		return
+	}
+	if len(resp.Repos) == 0 {
+		sb.WriteString("📋 No repos configured in ~/.away-repos.json — nothing to pick up.")
+	} else {
+		sb.WriteString("📋 Target repos:\n")
+		for _, r := range resp.Repos {
+			sb.WriteString("  • " + r + "\n")
+		}
+		sb.WriteString(fmt.Sprintf("\n🤖 Queued %d issue(s)", resp.Queued))
+		if resp.Capped {
+			sb.WriteString(" (capped)")
+		}
+		if len(resp.Issues) > 0 {
+			sb.WriteString(":\n")
+			for _, is := range resp.Issues {
+				sb.WriteString(fmt.Sprintf("  • %s#%d — %s\n", is.Repo, is.Number, is.Title))
+			}
+		} else {
+			sb.WriteString(" — no eligible open issues right now.\n")
+		}
+		sb.WriteString("\nRunning in auto mode; I'll open draft PRs and summarize. /back for a roundup.")
+	}
+	b.send(chatID, sb.String())
 }
 
 func (b *Bot) handleBack(chatID int64) {
