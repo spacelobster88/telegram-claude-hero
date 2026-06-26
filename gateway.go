@@ -303,6 +303,37 @@ func (g *GatewayClient) GetBackgroundStatus(chatID string) (*gatewayBackgroundSt
 	return &result, nil
 }
 
+// gatewayQueueStatus mirrors GET /api/gateway/queue-status/{chat_id}.
+type gatewayQueueStatus struct {
+	Busy               bool   `json:"busy"`
+	BusyMessage        string `json:"busy_message"`
+	ElapsedSeconds     int    `json:"elapsed_seconds"`
+	SlotsUsed          int    `json:"slots_used"`
+	SlotsMax           int    `json:"slots_max"`
+	QueueWaitTimeout   int    `json:"queue_wait_timeout"`
+	QueueWaitRemaining int    `json:"queue_wait_remaining"`
+}
+
+func (g *GatewayClient) GetQueueStatus(chatID string) (*gatewayQueueStatus, error) {
+	resp, err := g.httpClient.Get(g.baseURL + "/api/gateway/queue-status/" + chatID + "?bot_id=" + g.botID)
+	if err != nil {
+		return nil, fmt.Errorf("queue-status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var result gatewayQueueStatus
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
 // Harness status types
 type harnessPhaseStatus struct {
 	Total      int `json:"total"`
@@ -521,7 +552,7 @@ type MetaLoopStatus struct {
 	BotID            string                 `json:"bot_id"`
 	CadenceMode      string                 `json:"cadence_mode"`
 	PendingApprovals int                    `json:"pending_approvals"`
-	LastCycle         *MetaLoopCycleInfo     `json:"last_cycle"`
+	LastCycle        *MetaLoopCycleInfo     `json:"last_cycle"`
 	MetaGoalScores   map[string]interface{} `json:"meta_goal_scores"`
 }
 

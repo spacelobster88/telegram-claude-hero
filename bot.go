@@ -191,6 +191,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	case "status":
 		b.handleHarnessStatus(chatID)
 		return
+	case "queue":
+		b.handleQueue(chatID)
+		return
 	case "confirm":
 		b.handleConfirm(chatID)
 		return
@@ -267,6 +270,7 @@ func (b *Bot) registerCommands() {
 		tgbotapi.BotCommand{Command: "stop", Description: "停止会话 / Stop session"},
 		tgbotapi.BotCommand{Command: "cleanup", Description: "清理过期任务 / Clean up stale background jobs"},
 		tgbotapi.BotCommand{Command: "status", Description: "后台任务状态 / Background task status"},
+		tgbotapi.BotCommand{Command: "queue", Description: "消息队列状态 / Message queue status"},
 		tgbotapi.BotCommand{Command: "confirm", Description: "确认计划开始执行 / Confirm plan and start"},
 		tgbotapi.BotCommand{Command: "resume", Description: "恢复后台任务 / Resume harness loop in background"},
 		tgbotapi.BotCommand{Command: "away", Description: "离开模式 / Away - Nirmana takes over"},
@@ -619,6 +623,36 @@ func (b *Bot) handleTextGateway(chatID int64, text string, msg *tgbotapi.Message
 	go func() {
 		b.sendStreamingToTelegram(chatID, chatIDStr, text, userID, username)
 	}()
+}
+
+// handleQueue reports this chat's message-queue / session state: whether a message
+// is in flight, what it is + how long, process-slot usage, and the worst-case wait.
+func (b *Bot) handleQueue(chatID int64) {
+	if b.gateway == nil {
+		b.send(chatID, "Gateway not configured.")
+		return
+	}
+	chatIDStr := fmt.Sprintf("%d", chatID)
+	st, err := b.gateway.GetQueueStatus(chatIDStr)
+	if err != nil {
+		b.send(chatID, fmt.Sprintf("Error getting queue status: %v", err))
+		return
+	}
+
+	var sb strings.Builder
+	if !st.Busy {
+		sb.WriteString("🟢 Idle — no message in flight; you'll be served immediately.\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("🟡 Busy — running %dm%ds\n", st.ElapsedSeconds/60, st.ElapsedSeconds%60))
+		if st.BusyMessage != "" {
+			sb.WriteString(fmt.Sprintf("Processing: %q\n", st.BusyMessage))
+		}
+		sb.WriteString(fmt.Sprintf("A new message would wait up to ~%dm%ds before the slot frees.\n",
+			st.QueueWaitRemaining/60, st.QueueWaitRemaining%60))
+	}
+	sb.WriteString(fmt.Sprintf("Process slots: %d/%d used\n", st.SlotsUsed, st.SlotsMax))
+	sb.WriteString(fmt.Sprintf("Queue-wait timeout: %dm", st.QueueWaitTimeout/60))
+	b.send(chatID, sb.String())
 }
 
 func (b *Bot) handleHarnessStatus(chatID int64) {
