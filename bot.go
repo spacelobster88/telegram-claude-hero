@@ -723,6 +723,11 @@ func (b *Bot) formatJobStatus(sb *strings.Builder, job *gatewayHarnessStatusResp
 	}
 
 	if h == nil {
+		if job.BgStatus == "running" {
+			// No task DAG yet — Phase-1 / decomposition / waiting on the first response.
+			// Without this, /status would show only the bare elapsed timer (issue #7).
+			sb.WriteString("🧭 Initializing — gathering requirements / generating the task DAG (waiting on first response)\n")
+		}
 		return
 	}
 
